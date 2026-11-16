@@ -24,6 +24,20 @@ WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_LAYERED = 0x00080000
 WS_EX_NOACTIVATE = 0x08000000
 
+IMAGE_CURSOR = 2
+LR_LOADFROMFILE = 0x00000010
+SPI_SETCURSORS = 0x0057
+SM_CXCURSOR = 13
+SHCNE_ASSOCCHANGED = 0x08000000
+SHCNF_IDLIST = 0x0000
+
+OCR_NORMAL = 32512
+OCR_IBEAM = 32513
+OCR_WAIT = 32514
+OCR_NO = 32648
+OCR_HAND = 32649
+OCR_APPSTARTING = 32650
+
 HWND_TOPMOST = -1
 HWND_BOTTOM = 1
 SWP_NOSIZE = 0x0001
@@ -450,6 +464,62 @@ def set_windows_accent(r: int, g: int, b: int, prevalence: int = 1) -> None:
     apply_dwm_colorization(argb)
     broadcast_setting_change()
 
+def get_preferred_cursor_size() -> int:
+    """Returns a DPI-appropriate cursor size (32..64 px)."""
+    try:
+        sz = int(user32.GetSystemMetrics(SM_CXCURSOR))
+        if 24 <= sz <= 96:
+            return sz
+    except Exception:
+        pass
+    return 36
+
+def apply_system_cursors(cursor_map: dict[int, str]) -> bool:
+    """Loads .cur files and assigns them to system OCR_* cursor slots."""
+    user32.LoadImageW.argtypes = [
+        wintypes.HINSTANCE,
+        wintypes.LPCWSTR,
+        wintypes.UINT,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.UINT,
+    ]
+    user32.LoadImageW.restype = wintypes.HANDLE
+    user32.SetSystemCursor.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    user32.SetSystemCursor.restype = wintypes.BOOL
+
+    applied = 0
+    for ocr_id, cur_path in cursor_map.items():
+        if not os.path.exists(cur_path):
+            continue
+        hcur = user32.LoadImageW(None, cur_path, IMAGE_CURSOR, 0, 0, LR_LOADFROMFILE)
+        if hcur:
+            # SetSystemCursor takes ownership and destroys hcur automatically
+            if user32.SetSystemCursor(hcur, ocr_id):
+                applied += 1
+    return applied > 0
+
+
+def restore_system_cursors() -> None:
+    """Reloads the user's saved Windows cursor scheme from the registry."""
+    try:
+        user32.SystemParametersInfoW(SPI_SETCURSORS, 0, None, 0)
+    except Exception:
+        pass
+
+
+def notify_shell_icons_changed() -> None:
+    """Forces Windows Explorer to refresh desktop & Recycle Bin icons immediately."""
+    try:
+        shell32.SHChangeNotify.argtypes = [
+            wintypes.LONG,
+            wintypes.UINT,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        shell32.SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None)
+    except Exception:
+        pass
 
 def apply_dwm_colorization(argb: int) -> None:
     try:
