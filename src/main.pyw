@@ -78,11 +78,10 @@ if is_frozen():
         updater.recover_previous_install()
     except Exception:
         pass
-    for _stale in ("ChristmasOverlay.exe.new",):
+    for _stale in (exe_path() + ".new", os.path.join(_exe_dir, "ChristmasOverlay.exe.new")):
         try:
-            _p = os.path.join(_exe_dir, _stale)
-            if os.path.exists(_p):
-                os.remove(_p)
+            if os.path.exists(_stale):
+                os.remove(_stale)
         except Exception:
             pass
 
@@ -678,6 +677,14 @@ class ChristmasOverlay:
                 return
 
             def go():
+                try:
+                    updater.apply_update_and_restart(new_path)
+                except Exception as e:
+                    self._update_downloading = False
+                    self.tray.popup.refresh()
+                    self.show_toast(f"Update failed: {e}")
+                    return
+
                 self._shutting_down = True
                 self.weather.stop()
                 self._restore_system_preferences()
@@ -691,15 +698,18 @@ class ChristmasOverlay:
                         self._guard.release()
                     except Exception:
                         pass
-                updater.apply_update_and_restart(new_path)
                 try:
                     self.canvas.delete("all")
                     self.desktop_canvas.delete("all")
                     self.root.destroy()
                 except Exception:
                     pass
+                try:
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                except Exception:
+                    pass
                 os._exit(0)
-
             self.root.after(0, go)
 
         threading.Thread(target=worker, daemon=True).start()

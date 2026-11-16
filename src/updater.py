@@ -4,6 +4,7 @@ import os
 import subprocess
 import tempfile
 import urllib.request
+import sys
 from version import __version__, GITHUB_API_LATEST, USER_AGENT, EXE_ASSET_NAME
 from paths import exe_path, is_frozen
 
@@ -76,8 +77,7 @@ def check_for_update() -> dict | None:
 
 
 def download_exe(url: str) -> str:
-    target_dir = os.path.dirname(exe_path())
-    new_path = os.path.join(target_dir, "ChristmasOverlay.exe.new")
+    new_path = exe_path() + ".new"
     if os.path.exists(new_path):
         try:
             os.remove(new_path)
@@ -96,15 +96,26 @@ def download_exe(url: str) -> str:
     return new_path
 
 
+def _clean_spawn_env() -> dict[str, str]:
+    """Removes PyInstaller bootloader env vars so the restarted exe unpacks cleanly."""
+    env = os.environ.copy()
+    for key in ("_MEIPASS2", "TCL_LIBRARY", "TK_LIBRARY", "PYTHONHOME", "PYTHONPATH"):
+        env.pop(key, None)
+    return env
+
+
 def apply_update_and_restart(new_path: str) -> None:
     if not is_frozen():
         raise RuntimeError("Self-update only works from the packaged .exe")
     cur = exe_path()
     old = cur + ".old"
     pid = os.getpid()
-    bat = os.path.join(tempfile.gettempdir(), f"xmas_update_{pid}.bat")
+    tmp_dir = tempfile.gettempdir()
+    bat = os.path.join(tmp_dir, f"xmas_update_{pid}.bat")
+    log = os.path.join(tmp_dir, "xmas_update.log")
 
     script = f"""@echo off
+chcp 65001 >nul
 set /a tries=0
 :wait
 tasklist /fi "PID eq {pid}" 2>nul | find "{pid}" >nul && (
@@ -112,31 +123,46 @@ tasklist /fi "PID eq {pid}" 2>nul | find "{pid}" >nul && (
   goto wait
 )
 ping -n 2 127.0.0.1 >nul
-:swap
+
+:move_old
 set /a tries+=1
-if %tries% GTR 20 goto end
+if %tries% GTR 30 (
+  echo [%date% %time%] Failed to move current exe to .old > "{log}"
+  goto relaunch
+)
 if exist "{old}" del /f /q "{old}" >nul 2>&1
 move /y "{cur}" "{old}" >nul 2>&1
 if errorlevel 1 (
   ping -n 2 127.0.0.1 >nul
-  goto swap
+  goto move_old
+)
+
+set /a tries=0
+:move_new
+set /a tries+=1
+if %tries% GTR 30 (
+  echo [%date% %time%] Failed to move .new to current exe; rolling back > "{log}"
+  move /y "{old}" "{cur}" >nul 2>&1
+  goto relaunch
 )
 move /y "{new_path}" "{cur}" >nul 2>&1
 if errorlevel 1 (
-  move /y "{old}" "{cur}" >nul 2>&1
-  goto end
+  ping -n 2 127.0.0.1 >nul
+  goto move_new
 )
-start "" "{cur}"
-:end
+
+:relaunch
+if exist "{cur}" start "" "{cur}"
 del /f /q "{old}" >nul 2>&1
 (goto) 2>nul & del /f /q "%~f0"
 """
-    with open(bat, "w", encoding="ascii", newline="\r\n") as f:
+    with open(bat, "w", encoding="utf-8", newline="\r\n") as f:
         f.write(script)
 
     subprocess.Popen(
-        ["cmd", "/c", bat],
-        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
+        ["cmd.exe", "/c", bat],
+        creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
         close_fds=True,
-        cwd=tempfile.gettempdir(),
+        cwd=tmp_dir,
+        env=_clean_spawn_env(),
     )
