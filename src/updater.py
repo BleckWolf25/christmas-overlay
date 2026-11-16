@@ -2,13 +2,14 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import urllib.request
-import sys
-from version import __version__, GITHUB_API_LATEST, USER_AGENT, EXE_ASSET_NAME
 from paths import exe_path, is_frozen
+from version import __version__, EXE_ASSET_NAME, GITHUB_API_LATEST, USER_AGENT
 
 _TIMEOUT = 12
+
 
 def _parse_ver(v: str) -> tuple:
     v = v.strip().lstrip("vV")
@@ -42,6 +43,7 @@ def recover_previous_install() -> None:
             os.remove(old)
         except Exception:
             pass
+
 
 def check_for_update() -> dict | None:
     req = urllib.request.Request(
@@ -97,10 +99,25 @@ def download_exe(url: str) -> str:
 
 
 def _clean_spawn_env() -> dict[str, str]:
-    """Removes PyInstaller bootloader env vars so the restarted exe unpacks cleanly."""
+    """Removes PyInstaller 6+ bootloader env vars and _MEIPASS from PATH so the restarted exe unpacks fresh."""
     env = os.environ.copy()
-    for key in ("_MEIPASS2", "TCL_LIBRARY", "TK_LIBRARY", "PYTHONHOME", "PYTHONPATH"):
-        env.pop(key, None)
+    for key in list(env.keys()):
+        if key.startswith("_PYI_") or key in (
+            "_MEIPASS2",
+            "TCL_LIBRARY",
+            "TK_LIBRARY",
+            "PYTHONHOME",
+            "PYTHONPATH",
+        ):
+            env.pop(key, None)
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass and "PATH" in env:
+        norm_mei = os.path.normcase(os.path.normpath(meipass))
+        env["PATH"] = os.pathsep.join(
+            p for p in env["PATH"].split(os.pathsep)
+            if p and os.path.normcase(os.path.normpath(p)) != norm_mei
+        )
     return env
 
 
@@ -152,6 +169,11 @@ if errorlevel 1 (
 )
 
 :relaunch
+set "_PYI_PARENT_PROCESS_LEVEL="
+set "_PYI_APPLICATION_HOME_DIR="
+set "_PYI_ARCHIVE_FILE="
+set "_PYI_SPLASH_IPC="
+set "_MEIPASS2="
 if exist "{cur}" start "" "{cur}"
 del /f /q "{old}" >nul 2>&1
 (goto) 2>nul & del /f /q "%~f0"

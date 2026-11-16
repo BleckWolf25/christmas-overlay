@@ -1,5 +1,5 @@
 # src/version.py
-__version__ = "1.0.0"
+__version__ = "1.1.1"
 
 GITHUB_REPO = "Bleckwolf25/christmas-overlay"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
