@@ -1,0 +1,9 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "python.analysis.extraPaths": [
+        "./src"
+    ],
+    "files.exclude": {
+        "**/__pycache__": true
+    }
+}

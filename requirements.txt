@@ -1,0 +1,6 @@
+# runtime
+pystray>=0.19.5
+Pillow>=10.0.0
+
+# build only
+pyinstaller>=6.0
