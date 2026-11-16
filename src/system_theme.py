@@ -1,4 +1,3 @@
-# src/system_theme.py
 import ctypes
 from ctypes import POINTER, byref, c_int, c_uint, c_void_p, c_wchar_p, wintypes
 import datetime
@@ -6,17 +5,46 @@ import json
 import math
 import os
 import random
+import subprocess
 import threading
 import traceback
 import winreg
+import random
+import struct
+import subprocess
+import threading
+import time
+
 from PIL import Image, ImageDraw, ImageFilter
+
+from festive_assets import (
+    render_candy_arrow_cursor,
+    render_festive_app_icon,
+    render_ibeam_cursor,
+    render_recycle_bin_icon,
+    render_santa_mitten_cursor,
+    render_winter_backdrop,
+    render_wreath_cursor,
+    save_cur,
+)
+from state import CONFIG_DIR
 from win32 import (
-    SPI_GETDESKWALLPAPER,
-    SPI_SETDESKWALLPAPER,
+    OCR_APPSTARTING,
+    OCR_HAND,
+    OCR_IBEAM,
+    OCR_NO,
+    OCR_NORMAL,
+    OCR_WAIT,
     SPIF_SENDCHANGE,
     SPIF_UPDATEINIFILE,
+    SPI_GETDESKWALLPAPER,
+    SPI_SETDESKWALLPAPER,
     apply_dwm_colorization,
+    apply_system_cursors,
     broadcast_setting_change,
+    get_preferred_cursor_size,
+    notify_shell_icons_changed,
+    restore_system_cursors,
     set_windows_accent,
     user32,
 )
@@ -24,12 +52,25 @@ from win32 import (
 _PUBLIC_ROOT = os.environ.get("PUBLIC") or r"C:\Users\Public"
 PUBLIC_THEME_DIR = os.path.join(_PUBLIC_ROOT, "Pictures", "ChristmasOverlay")
 BACKUP_PATH = os.path.join(PUBLIC_THEME_DIR, "theme_backup.json")
-WALLPAPER_PATH = os.path.join(PUBLIC_THEME_DIR, "festive_wallpaper.jpg")
+WALLPAPER_PATH = os.path.join(PUBLIC_THEME_DIR, "festive_wallpaper.png")
+LOCKSCREEN_PATH = os.path.join(PUBLIC_THEME_DIR, "festive_lockscreen.png")
 
 # Festive Crimson Red (#DC2626 -> R=220, G=38, B=38)
 FESTIVE_RGB = (220, 38, 38)
 
+_RECYCLE_BIN_KEY = (
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\CLSID"
+    r"\{645FF040-5081-101B-9F08-00AA002F954E}\DefaultIcon"
+)
+_LOCKSCREEN_CREATIVE_KEY = (
+    r"Software\Microsoft\Windows\CurrentVersion\Lock Screen\Creative"
+)
+_LOCKSCREEN_POLICY_KEY = (
+    r"SOFTWARE\Policies\Microsoft\Windows\Personalization"
+)
+
 _ole32 = ctypes.WinDLL("ole32", use_last_error=True)
+
 
 class _GUID(ctypes.Structure):
     _fields_ = [
@@ -50,6 +91,7 @@ class _GUID(ctypes.Structure):
             int(parts[2], 16),
             (ctypes.c_ubyte * 8)(*d4),
         )
+
 
 _CLSID_DesktopWallpaper = _GUID.from_str("{C2CF3110-460E-4FC1-B9D0-8A1C0C9CC4BD}")
 _IID_IDesktopWallpaper = _GUID.from_str("{B92B56A9-8B55-4E14-9A89-0199BBB6F93B}")
@@ -109,7 +151,7 @@ def _with_desktop_wallpaper(fn):
 
 
 def _find_previous_user_wallpaper() -> str:
-    """Finds the user's real wallpaper from Windows 11 BackgroundHistoryPath0..4."""
+    """Finds the user's real wallpaper from Windows 10/11 BackgroundHistoryPath0..4."""
     try:
         with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
@@ -282,13 +324,14 @@ def _set_wallpaper(path: str) -> bool:
 
 
 def _load_backup() -> dict:
-    try:
-        with open(BACKUP_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        pass
+    for candidate in (BACKUP_PATH, os.path.join(CONFIG_DIR, "theme_backup.json")):
+        try:
+            with open(candidate, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
     return {}
 
 
@@ -303,7 +346,8 @@ def _save_backup(data: dict) -> None:
         pass
 
 
-def _read_reg_value(root, subkey: str, name: str):
+def _read_reg_typed(root, subkey: str, name: str):
+    """Reads any registry value into a JSON-serializable dict."""
     try:
         with winreg.OpenKey(root, subkey, 0, winreg.KEY_READ) as k:
             val, reg_type = winreg.QueryValueEx(k, name)
@@ -311,12 +355,15 @@ def _read_reg_value(root, subkey: str, name: str):
                 return {"type": "bin", "val": val.hex()}
             if reg_type == winreg.REG_DWORD:
                 return {"type": "dword", "val": int(val)}
+            if reg_type in (winreg.REG_SZ, winreg.REG_EXPAND_SZ) and isinstance(val, str):
+                return {"type": "str", "reg_type": reg_type, "val": val}
     except Exception:
         pass
     return None
 
 
-def _write_reg_value(root, subkey: str, name: str, entry: dict | None) -> None:
+def _write_reg_typed(root, subkey: str, name: str, entry: dict | None) -> None:
+    """Restores a registry value serialized by _read_reg_typed (or deletes if None)."""
     try:
         with winreg.CreateKeyEx(root, subkey, 0, winreg.KEY_SET_VALUE) as k:
             if entry is None:
@@ -325,17 +372,25 @@ def _write_reg_value(root, subkey: str, name: str, entry: dict | None) -> None:
                 except FileNotFoundError:
                     pass
                 return
-            if entry.get("type") == "bin":
+            t = entry.get("type")
+            if t == "bin":
                 winreg.SetValueEx(
                     k, name, 0, winreg.REG_BINARY, bytes.fromhex(entry["val"])
                 )
-            elif entry.get("type") == "dword":
+            elif t == "dword":
                 winreg.SetValueEx(
                     k, name, 0, winreg.REG_DWORD, int(entry["val"]) & 0xFFFFFFFF
                 )
+            elif t == "str":
+                rtype = int(entry.get("reg_type", winreg.REG_SZ))
+                winreg.SetValueEx(k, name, 0, rtype, str(entry["val"]))
     except Exception:
         pass
 
+
+def _write_reg_raw(root, subkey: str, name: str, val, reg_type: int) -> None:
+    with winreg.CreateKeyEx(root, subkey, 0, winreg.KEY_SET_VALUE) as k:
+        winreg.SetValueEx(k, name, 0, reg_type, val)
 
 def _render_festive_wallpaper(width: int, height: int, out_path: str) -> None:
     target_w = max(800, int(width))
@@ -343,17 +398,9 @@ def _render_festive_wallpaper(width: int, height: int, out_path: str) -> None:
     w = target_w // 2
     h = target_h // 2
 
-    hour = datetime.datetime.now().hour
-    is_day = 7 <= hour < 18
-
-    if is_day:
-        top_rgb = (18, 32, 58)
-        mid_rgb = (38, 62, 98)
-        hor_rgb = (118, 96, 122)
-    else:
-        top_rgb = (6, 11, 24)
-        mid_rgb = (13, 25, 48)
-        hor_rgb = (26, 46, 76)
+    top_rgb = (6, 11, 24)
+    mid_rgb = (13, 25, 48)
+    hor_rgb = (26, 46, 76)
 
     grad = Image.new("RGB", (1, h))
     g_px = grad.load()
@@ -381,12 +428,11 @@ def _render_festive_wallpaper(width: int, height: int, out_path: str) -> None:
     sky_fx = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     s_draw = ImageDraw.Draw(sky_fx)
     rng = random.Random(20261225)
-    star_count = 95 if is_day else 200
-    for _ in range(star_count):
+    for _ in range(200):
         sx = rng.randint(0, w - 1)
         sy = rng.randint(0, int(h * 0.62))
         icon_dim = 0.45 if sx < w * 0.28 else 1.0
-        alpha = int(rng.randint(70, 220) * (0.45 if is_day else 1.0) * icon_dim)
+        alpha = int(rng.randint(70, 220) * icon_dim)
         r = 1 if rng.random() > 0.88 else 0
         col = (255, 248, 225, alpha) if rng.random() > 0.3 else (190, 225, 255, alpha)
         s_draw.ellipse([sx - r, sy - r, sx + r, sy + r], fill=col)
@@ -397,22 +443,22 @@ def _render_festive_wallpaper(width: int, height: int, out_path: str) -> None:
     h_draw = ImageDraw.Draw(halo)
     h_draw.ellipse(
         [mx - moon_r * 4, my - moon_r * 4, mx + moon_r * 4, my + moon_r * 4],
-        fill=(226, 238, 255, 28 if is_day else 44),
+        fill=(226, 238, 255, 44),
     )
     halo = halo.filter(ImageFilter.GaussianBlur(radius=max(8, int(moon_r * 1.5))))
     base = Image.alpha_composite(base, halo)
     s_draw.ellipse(
         [mx - moon_r, my - moon_r, mx + moon_r, my + moon_r],
-        fill=(248, 250, 252, 175 if is_day else 240),
+        fill=(248, 250, 252, 240),
     )
     base = Image.alpha_composite(base, sky_fx)
 
     aurora = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     a_draw = ImageDraw.Draw(aurora)
     ribbons = [
-        (0.24, 0.045, (16, 185, 129, 36 if is_day else 64), 26),
-        (0.30, 0.038, (52, 211, 153, 28 if is_day else 50), 18),
-        (0.21, 0.050, (129, 140, 248, 22 if is_day else 42), 22),
+        (0.24, 0.045, (16, 185, 129, 64), 26),
+        (0.30, 0.038, (52, 211, 153, 50), 18),
+        (0.21, 0.050, (129, 140, 248, 42), 22),
     ]
     for y_frac, amp_frac, color, thickness in ribbons:
         pts = []
@@ -446,8 +492,7 @@ def _render_festive_wallpaper(width: int, height: int, out_path: str) -> None:
     for xf, yf in peaks:
         mtn_pts.append((int(w * xf), int(h * yf)))
     mtn_pts.append((w, h))
-    mtn_col = (44, 62, 92, 255) if is_day else (15, 26, 46, 255)
-    l_draw.polygon(mtn_pts, fill=mtn_col)
+    l_draw.polygon(mtn_pts, fill=(15, 26, 46, 255))
 
     def draw_pine(draw_ctx, cx: int, base_y: int, tree_h: int, color: tuple):
         tiers = 4
@@ -468,12 +513,9 @@ def _render_festive_wallpaper(width: int, height: int, out_path: str) -> None:
         hy = h * (0.76 + 0.025 * math.sin(t * math.pi * 2.4 + 0.6))
         back_hill.append((int(w * t), int(hy)))
     back_hill.append((w, h))
-    l_draw.polygon(
-        back_hill,
-        fill=(62, 84, 116, 255) if is_day else (20, 34, 58, 255),
-    )
+    l_draw.polygon(back_hill, fill=(20, 34, 58, 255))
 
-    far_tree_col = (34, 52, 78, 255) if is_day else (12, 22, 39, 255)
+    far_tree_col = (12, 22, 39, 255)
     for tx in range(int(w * 0.03), w, max(14, w // 42)):
         t = tx / w
         hy = int(h * (0.76 + 0.025 * math.sin(t * math.pi * 2.4 + 0.6)))
@@ -486,12 +528,9 @@ def _render_festive_wallpaper(width: int, height: int, out_path: str) -> None:
         hy = h * (0.835 + 0.022 * math.cos(t * math.pi * 2.0 - 0.5))
         front_hill.append((int(w * t), int(hy)))
     front_hill.append((w, h))
-    l_draw.polygon(
-        front_hill,
-        fill=(186, 204, 226, 255) if is_day else (34, 52, 80, 255),
-    )
+    l_draw.polygon(front_hill, fill=(34, 52, 80, 255))
 
-    near_tree_col = (20, 36, 56, 255) if is_day else (8, 16, 30, 255)
+    near_tree_col = (8, 16, 30, 255)
     for tx in range(int(w * 0.02), int(w * 0.98), max(18, w // 32)):
         t = tx / w
         if 0.32 < t < 0.68 and rng.random() > 0.25:
@@ -500,6 +539,7 @@ def _render_festive_wallpaper(width: int, height: int, out_path: str) -> None:
         th = rng.randint(int(h * 0.07), int(h * 0.14))
         draw_pine(l_draw, tx, hy + 4, th, near_tree_col)
 
+    # Cozy cabin + warm window glow + chimney smoke
     cab_x = int(w * 0.72)
     cab_y = int(h * (0.835 + 0.022 * math.cos(0.72 * math.pi * 2.0 - 0.5))) + 1
     cw = max(18, w // 44)
@@ -572,8 +612,71 @@ def _render_festive_wallpaper(width: int, height: int, out_path: str) -> None:
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     final = base.convert("RGB").resize((target_w, target_h), Image.Resampling.BICUBIC)
-    final.save(out_path, "JPEG", quality=95)
+    final.save(out_path, "PNG")
 
+def _save_win32_ico(img: Image.Image, out_path: str) -> None:
+    """Writes a native 32-bit BGRA DIB .ico file that Windows Shell never rejects."""
+    sizes = (16, 24, 32, 48, 64, 128, 256)
+    src = img.convert("RGBA")
+    entries = []
+
+    for sz in sizes:
+        frame = src.resize((sz, sz), Image.Resampling.LANCZOS)
+        r, g, b, a = frame.split()
+        bgra = Image.merge("RGBA", (b, g, r, a)).tobytes()
+        alpha_bytes = a.tobytes()
+
+        row_bytes = sz * 4
+        xor_rows = [
+            bgra[y * row_bytes : (y + 1) * row_bytes]
+            for y in range(sz - 1, -1, -1)
+        ]
+        xor_data = b"".join(xor_rows)
+
+        and_stride = ((sz + 31) // 32) * 4
+        and_rows = []
+        for y in range(sz - 1, -1, -1):
+            row = bytearray(and_stride)
+            row_off = y * sz
+            for x in range(sz):
+                if alpha_bytes[row_off + x] < 128:
+                    row[x >> 3] |= 0x80 >> (x & 7)
+            and_rows.append(bytes(row))
+        and_data = b"".join(and_rows)
+
+        bih = struct.pack(
+            "<IIIHHIIIIII",
+            40,
+            sz,
+            sz * 2,
+            1,
+            32,
+            0,
+            len(xor_data) + len(and_data),
+            0,
+            0,
+            0,
+            0,
+        )
+        entries.append((sz, bih + xor_data + and_data))
+
+    header = struct.pack("<HHH", 0, 1, len(entries))
+    offset = 6 + 16 * len(entries)
+    dir_entries = []
+    for sz, blob in entries:
+        dim = 0 if sz >= 256 else sz
+        dir_entries.append(
+            struct.pack("<BBBBHHII", dim, dim, 0, 0, 1, 32, len(blob), offset)
+        )
+        offset += len(blob)
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "wb") as f:
+        f.write(header)
+        for d in dir_entries:
+            f.write(d)
+        for _, blob in entries:
+            f.write(blob)
 
 class SystemThemeManager:
     DWM_KEY = r"Software\Microsoft\Windows\DWM"
@@ -594,10 +697,15 @@ class SystemThemeManager:
     def __init__(self):
         self._wallpaper_active = False
         self._accent_active = False
+        self._cursors_active = False
+        self._icons_active = False
+        self._lockscreen_active = False
+
         self._wp_lock = threading.Lock()
         self._accent_lock = threading.Lock()
+        self._state_lock = threading.Lock()
 
-    def apply_wallpaper(self, width: int, height: int) -> tuple[bool, str]:
+    def apply_wallpaper(self, vw: int, vh: int) -> tuple[bool, str | None]:
         self._wallpaper_active = True
 
         def worker():
@@ -605,35 +713,40 @@ class SystemThemeManager:
                 if not self._wallpaper_active:
                     return
                 try:
-                    backup = _load_backup()
-                    saved_wp = backup.get("wallpaper", "")
-                    if "wallpaper" not in backup or _is_managed_wallpaper(saved_wp):
-                        cur = _get_current_wallpaper()
-                        if _is_managed_wallpaper(cur) or not cur:
-                            cur = _find_previous_user_wallpaper()
-                        backup["wallpaper"] = cur
-                        backup["bg_type"] = _read_reg_value(
-                            winreg.HKEY_CURRENT_USER, self.WALLPAPERS_KEY, "BackgroundType"
-                        )
-                        _save_backup(backup)
+                    with self._state_lock:
+                        backup = _load_backup()
+                        saved_wp = backup.get("wallpaper", "")
+                        if "wallpaper" not in backup or _is_managed_wallpaper(saved_wp):
+                            cur = _get_current_wallpaper()
+                            if _is_managed_wallpaper(cur) or not cur:
+                                cur = _find_previous_user_wallpaper()
+                            backup["wallpaper"] = cur
+                            backup["bg_type"] = _read_reg_typed(
+                                winreg.HKEY_CURRENT_USER,
+                                self.WALLPAPERS_KEY,
+                                "BackgroundType",
+                            )
+                            _save_backup(backup)
 
-                    _render_festive_wallpaper(width, height, WALLPAPER_PATH)
+                    os.makedirs(PUBLIC_THEME_DIR, exist_ok=True)
+                    _render_festive_wallpaper(vw, vh, WALLPAPER_PATH)
                     if self._wallpaper_active:
                         _set_wallpaper(WALLPAPER_PATH)
                 except Exception:
                     traceback.print_exc()
 
         threading.Thread(target=worker, daemon=True).start()
-        return True, ""
+        return True, None
 
     def _restore_wallpaper_sync(self) -> None:
         with self._wp_lock:
-            backup = _load_backup()
-            has_backup = "wallpaper" in backup
-            orig = backup.pop("wallpaper", "")
-            bg_type = backup.pop("bg_type", None)
-            if has_backup:
-                _save_backup(backup)
+            with self._state_lock:
+                backup = _load_backup()
+                has_backup = "wallpaper" in backup
+                orig = backup.pop("wallpaper", "")
+                bg_type = backup.pop("bg_type", None)
+                if has_backup:
+                    _save_backup(backup)
 
             if not orig or _is_managed_wallpaper(orig) or not os.path.exists(orig):
                 orig = _find_previous_user_wallpaper()
@@ -644,7 +757,7 @@ class SystemThemeManager:
                 _set_solid_color_wallpaper()
 
             if bg_type is not None:
-                _write_reg_value(
+                _write_reg_typed(
                     winreg.HKEY_CURRENT_USER,
                     self.WALLPAPERS_KEY,
                     "BackgroundType",
@@ -663,15 +776,16 @@ class SystemThemeManager:
                 if not self._accent_active:
                     return
                 try:
-                    backup = _load_backup()
-                    if "accent_v2" not in backup:
-                        saved = {}
-                        for subkey, name in self._ACCENT_FIELDS:
-                            saved[f"{subkey}\\{name}"] = _read_reg_value(
-                                winreg.HKEY_CURRENT_USER, subkey, name
-                            )
-                        backup["accent_v2"] = saved
-                        _save_backup(backup)
+                    with self._state_lock:
+                        backup = _load_backup()
+                        if "accent_v2" not in backup:
+                            saved = {}
+                            for subkey, name in self._ACCENT_FIELDS:
+                                saved[f"{subkey}\\{name}"] = _read_reg_typed(
+                                    winreg.HKEY_CURRENT_USER, subkey, name
+                                )
+                            backup["accent_v2"] = saved
+                            _save_backup(backup)
 
                     if self._accent_active:
                         set_windows_accent(*FESTIVE_RGB, prevalence=1)
@@ -682,14 +796,16 @@ class SystemThemeManager:
 
     def _restore_accent_sync(self) -> None:
         with self._accent_lock:
-            backup = _load_backup()
-            saved = backup.pop("accent_v2", None)
-            _save_backup(backup)
+            with self._state_lock:
+                backup = _load_backup()
+                saved = backup.pop("accent_v2", None)
+                _save_backup(backup)
+
             if isinstance(saved, dict):
                 for subkey, name in self._ACCENT_FIELDS:
                     full_key = f"{subkey}\\{name}"
                     if full_key in saved:
-                        _write_reg_value(
+                        _write_reg_typed(
                             winreg.HKEY_CURRENT_USER, subkey, name, saved[full_key]
                         )
                 col_entry = saved.get(f"{self.DWM_KEY}\\ColorizationColor")
@@ -701,12 +817,250 @@ class SystemThemeManager:
         self._accent_active = False
         threading.Thread(target=self._restore_accent_sync, daemon=True).start()
 
+    def apply_cursors(self) -> tuple[bool, str | None]:
+        try:
+            cur_dir = os.path.join(CONFIG_DIR, "cursors")
+            os.makedirs(cur_dir, exist_ok=True)
+            sz = get_preferred_cursor_size()
+
+            specs = {
+                "arrow.cur": (render_candy_arrow_cursor(sz), [OCR_NORMAL]),
+                "hand.cur": (render_santa_mitten_cursor(sz), [OCR_HAND]),
+                "wreath.cur": (
+                    render_wreath_cursor(sz),
+                    [OCR_WAIT, OCR_APPSTARTING, OCR_NO],
+                ),
+                "ibeam.cur": (render_ibeam_cursor(sz), [OCR_IBEAM]),
+            }
+            cursor_map: dict[int, str] = {}
+            for filename, ((img, hx, hy), ocr_ids) in specs.items():
+                path = os.path.join(cur_dir, filename)
+                save_cur(img, path, hx, hy)
+                for oid in ocr_ids:
+                    cursor_map[oid] = path
+
+            ok = apply_system_cursors(cursor_map)
+            self._cursors_active = ok
+            return (True, None) if ok else (False, "Could not apply festive cursors.")
+        except Exception as e:
+            return False, f"Cursor error: {e}"
+
+    def restore_cursors(self) -> None:
+        if not self._cursors_active:
+            return
+        self._cursors_active = False
+        restore_system_cursors()
+
+    def apply_festive_icons(self) -> tuple[bool, str | None]:
+        try:
+            icon_dir = os.path.join(PUBLIC_THEME_DIR, "icons")
+            os.makedirs(icon_dir, exist_ok=True)
+
+            # Remove previous icons so Explorer doesn't reuse stale IconCache entries
+            for old in os.listdir(icon_dir):
+                if old.startswith("recycle_") and old.endswith(".ico"):
+                    try:
+                        os.remove(os.path.join(icon_dir, old))
+                    except Exception:
+                        pass
+
+            tag = int(time.time() * 1000) % 10_000_000
+            empty_ico = os.path.abspath(
+                os.path.join(icon_dir, f"recycle_empty_{tag}.ico")
+            )
+            full_ico = os.path.abspath(
+                os.path.join(icon_dir, f"recycle_full_{tag}.ico")
+            )
+            app_ico = os.path.abspath(os.path.join(icon_dir, "festive_app.ico"))
+
+            _save_win32_ico(render_recycle_bin_icon(full=False), empty_ico)
+            _save_win32_ico(render_recycle_bin_icon(full=True), full_ico)
+            _save_win32_ico(render_festive_app_icon(), app_ico)
+
+            with self._state_lock:
+                backup = _load_backup()
+                if "recycle_bin" not in backup:
+                    saved = {}
+                    for val_name in ("", "empty", "full"):
+                        saved[val_name] = _read_reg_typed(
+                            winreg.HKEY_CURRENT_USER, _RECYCLE_BIN_KEY, val_name
+                        )
+                    backup["recycle_bin"] = saved
+                    _save_backup(backup)
+
+            _write_reg_raw(
+                winreg.HKEY_CURRENT_USER,
+                _RECYCLE_BIN_KEY,
+                "",
+                f"{empty_ico},0",
+                winreg.REG_EXPAND_SZ,
+            )
+            _write_reg_raw(
+                winreg.HKEY_CURRENT_USER,
+                _RECYCLE_BIN_KEY,
+                "empty",
+                f"{empty_ico},0",
+                winreg.REG_EXPAND_SZ,
+            )
+            _write_reg_raw(
+                winreg.HKEY_CURRENT_USER,
+                _RECYCLE_BIN_KEY,
+                "full",
+                f"{full_ico},0",
+                winreg.REG_EXPAND_SZ,
+            )
+            notify_shell_icons_changed()
+            self._icons_active = True
+            return True, app_ico
+        except Exception as e:
+            return False, f"Icon error: {e}"
+        
+    def restore_festive_icons(self) -> None:
+        with self._state_lock:
+            backup = _load_backup()
+            saved = backup.pop("recycle_bin", None)
+            _save_backup(backup)
+
+        was_active = self._icons_active
+        self._icons_active = False
+        if not saved and not was_active:
+            return
+        if isinstance(saved, dict):
+            for val_name in ("", "empty", "full"):
+                if val_name in saved:
+                    _write_reg_typed(
+                        winreg.HKEY_CURRENT_USER,
+                        _RECYCLE_BIN_KEY,
+                        val_name,
+                        saved[val_name],
+                    )
+        notify_shell_icons_changed()
+
+    @staticmethod
+    def _set_winrt_lockscreen_async(image_path: str) -> None:
+        """Applies a Lock Screen image via WinRT on a background thread."""
+        escaped = image_path.replace("'", "''")
+        ps_script = (
+            "$ErrorActionPreference='Stop';"
+            "Add-Type -AssemblyName System.Runtime.WindowsRuntime;"
+            "$asTaskOp=([System.WindowsRuntimeSystemExtensions].GetMethods()|"
+            "Where-Object{$_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and "
+            "$_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'})[0];"
+            "$asTaskAct=([System.WindowsRuntimeSystemExtensions].GetMethods()|"
+            "Where-Object{$_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and "
+            "$_.GetParameters()[0].ParameterType.Name -eq 'IAsyncAction'})[0];"
+            "Function AwaitOp($t,$r){$m=$asTaskOp.MakeGenericMethod($r);$nt=$m.Invoke($null,@($t));$nt.Wait(-1)|Out-Null;$nt.Result};"
+            "Function AwaitAct($t){$nt=$asTaskAct.Invoke($null,@($t));$nt.Wait(-1)|Out-Null};"
+            "[Windows.Storage.StorageFile,Windows.Storage,ContentType=WindowsRuntime]|Out-Null;"
+            "[Windows.System.UserProfile.LockScreen,Windows.System.UserProfile,ContentType=WindowsRuntime]|Out-Null;"
+            f"$f=AwaitOp([Windows.Storage.StorageFile]::GetFileFromPathAsync('{escaped}'))([Windows.Storage.StorageFile]);"
+            "AwaitAct([Windows.System.UserProfile.LockScreen]::SetImageFileAsync($f));"
+        )
+
+        def worker():
+            try:
+                subprocess.run(
+                    [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-WindowStyle",
+                        "Hidden",
+                        "-Command",
+                        ps_script,
+                    ],
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    timeout=20,
+                    check=False,
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def apply_lockscreen(self, vw: int, vh: int) -> tuple[bool, str | None]:
+        no_ls = _read_reg_typed(
+            winreg.HKEY_LOCAL_MACHINE, _LOCKSCREEN_POLICY_KEY, "NoLockScreen"
+        )
+        pol_img = _read_reg_typed(
+            winreg.HKEY_LOCAL_MACHINE, _LOCKSCREEN_POLICY_KEY, "LockScreenImage"
+        )
+        if (no_ls and no_ls.get("val")) or (pol_img and pol_img.get("val")):
+            return False, "Lock screen is locked by Windows policy."
+
+        try:
+            with self._state_lock:
+                backup = _load_backup()
+                if "lockscreen" not in backup:
+                    saved = {}
+                    for name in (
+                        "LandscapeAssetPath",
+                        "PortraitAssetPath",
+                        "RotatingLockScreenEnabled",
+                        "RotatingLockScreenOverlayEnabled",
+                    ):
+                        saved[name] = _read_reg_typed(
+                            winreg.HKEY_CURRENT_USER, _LOCKSCREEN_CREATIVE_KEY, name
+                        )
+                    backup["lockscreen"] = saved
+                    _save_backup(backup)
+
+            os.makedirs(PUBLIC_THEME_DIR, exist_ok=True)
+            render_winter_backdrop(
+                min(2560, vw), min(1440, vh), LOCKSCREEN_PATH, lockscreen=True
+            )
+            self._set_winrt_lockscreen_async(LOCKSCREEN_PATH)
+            self._lockscreen_active = True
+            return True, None
+        except Exception as e:
+            return False, f"Lock screen error: {e}"
+
+    def restore_lockscreen(self) -> None:
+        with self._state_lock:
+            backup = _load_backup()
+            saved = backup.pop("lockscreen", None)
+            _save_backup(backup)
+
+        was_active = self._lockscreen_active
+        self._lockscreen_active = False
+        if not saved and not was_active:
+            return
+
+        orig_asset = None
+        if isinstance(saved, dict):
+            for name in (
+                "LandscapeAssetPath",
+                "PortraitAssetPath",
+                "RotatingLockScreenEnabled",
+                "RotatingLockScreenOverlayEnabled",
+            ):
+                if name in saved:
+                    _write_reg_typed(
+                        winreg.HKEY_CURRENT_USER,
+                        _LOCKSCREEN_CREATIVE_KEY,
+                        name,
+                        saved[name],
+                    )
+            la = saved.get("LandscapeAssetPath")
+            if isinstance(la, dict) and isinstance(la.get("val"), str):
+                if os.path.exists(la["val"]):
+                    orig_asset = la["val"]
+
+        if orig_asset:
+            self._set_winrt_lockscreen_async(orig_asset)
+
+    # --- Global Synchronous Restore (for App Shutdown / Exit Hooks) ---
+
     def restore_all(self) -> None:
-        """Synchronous full restore used during app shutdown / exit hooks."""
         self._wallpaper_active = False
         self._accent_active = False
+        self.restore_cursors()
+        self.restore_festive_icons()
+
         backup = _load_backup()
         if "wallpaper" in backup or _is_managed_wallpaper(_get_current_wallpaper()):
             self._restore_wallpaper_sync()
         if "accent_v2" in backup:
             self._restore_accent_sync()
+        if "lockscreen" in backup or self._lockscreen_active:
+            self.restore_lockscreen()

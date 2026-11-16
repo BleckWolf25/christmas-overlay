@@ -19,11 +19,12 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 MUSIC_DIR = get_windows_music_dir()
 
 class AppState:
-    SCHEMA = 3
+    SCHEMA = 4
 
     def __init__(self):
         self.visible = True
         self.snow_enabled = True
+        self.window_snow_enabled = True
         self.mode_idx = 0
         self.lights_visible = True
         self.frost_mode_idx = 0
@@ -34,7 +35,10 @@ class AppState:
         self.music_enabled = False
         self.music_volume = 75
         self.wallpaper_enabled = False
+        self.lockscreen_enabled = False
         self.accent_enabled = False
+        self.cursors_enabled = False
+        self.festive_icons_enabled = False
         self.advent_enabled = True
         self.start_with_windows = False
         self.auto_seasonal = True
@@ -59,6 +63,7 @@ class AppState:
             "schema": self.SCHEMA,
             "visible": self.visible,
             "snow_enabled": self.snow_enabled,
+            "window_snow_enabled": self.window_snow_enabled,
             "mode_idx": self.mode_idx,
             "lights_visible": self.lights_visible,
             "frost_mode_idx": self.frost_mode_idx,
@@ -69,7 +74,10 @@ class AppState:
             "music_enabled": self.music_enabled,
             "music_volume": self.music_volume,
             "wallpaper_enabled": self.wallpaper_enabled,
+            "lockscreen_enabled": self.lockscreen_enabled,
             "accent_enabled": self.accent_enabled,
+            "cursors_enabled": self.cursors_enabled,
+            "festive_icons_enabled": self.festive_icons_enabled,
             "advent_enabled": self.advent_enabled,
             "start_with_windows": self.start_with_windows,
             "auto_seasonal": self.auto_seasonal,
@@ -95,6 +103,7 @@ class AppState:
 
             st.visible = bool(data.get("visible", st.visible))
             st.snow_enabled = bool(data.get("snow_enabled", st.snow_enabled))
+            st.window_snow_enabled = bool(data.get("window_snow_enabled", st.window_snow_enabled))
             st.mode_idx = int(data.get("mode_idx", st.mode_idx)) % len(SNOW_MODES)
             st.lights_visible = bool(data.get("lights_visible", st.lights_visible))
             st.frost_mode_idx = int(data.get("frost_mode_idx", st.frost_mode_idx)) % len(FROST_MODES)
@@ -105,7 +114,10 @@ class AppState:
             st.music_enabled = bool(data.get("music_enabled", st.music_enabled))
             st.music_volume = max(0, min(100, int(data.get("music_volume", st.music_volume))))
             st.wallpaper_enabled = bool(data.get("wallpaper_enabled", st.wallpaper_enabled))
+            st.lockscreen_enabled = bool(data.get("lockscreen_enabled", st.lockscreen_enabled))
             st.accent_enabled = bool(data.get("accent_enabled", st.accent_enabled))
+            st.cursors_enabled = bool(data.get("cursors_enabled", st.cursors_enabled))
+            st.festive_icons_enabled = bool(data.get("festive_icons_enabled", st.festive_icons_enabled))
             st.advent_enabled = bool(data.get("advent_enabled", st.advent_enabled))
             st.start_with_windows = bool(data.get("start_with_windows", st.start_with_windows))
             st.auto_seasonal = bool(data.get("auto_seasonal", st.auto_seasonal))

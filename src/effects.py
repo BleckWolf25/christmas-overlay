@@ -173,7 +173,12 @@ class SnowSystem:
         f.stuck_to = edge_key
         f.pile_key = key
         f.pile_size = max(0.4, f.size * 0.35)
-        f.y = edge_y - (14.0 if pile_h > 14.0 else pile_h) - random.uniform(0, 1.2)
+        f.y = (
+            edge_y
+            - (f.size * 0.65)
+            - (14.0 if pile_h > 14.0 else pile_h)
+            - random.uniform(0, 1.2)
+        )
         new_h = pile_h + f.pile_size
         self.piles[key] = 14.0 if new_h > 14.0 else new_h
         f.vy = 0.0
@@ -263,11 +268,31 @@ class SnowSystem:
 
             if tb:
                 tx1, ty1, tx2, _ = tb
-                if tx1 - 2 <= x <= tx2 + 2 and -3.0 < (y - ty1) < 3.0:
+                if tx1 - 2 <= x <= tx2 + 2 and old_y <= ty1 + 2.0 and y >= ty1 - 2.0:
                     f.x, f.y = x, y
                     self._stick(f, ty1, "taskbar")
                     self.stuck.append(f)
                     continue
+
+            win_entries = env_rects.get("window_entries") or (
+                [(fg_hwnd, fg)] if (fg and fg_hwnd) else []
+            )
+            landed = False
+            for idx, (whwnd, (wx1, wy1, wx2, _)) in enumerate(win_entries[:6]):
+                if wy1 >= 4.0 and wx1 - 2 <= x <= wx2 + 2 and old_y <= wy1 + 2.0 and y >= wy1 - 2.0:
+                    # Skip if occluded by a higher-Z window
+                    occluded = any(
+                        hx1 <= x <= hx2 and hy1 <= wy1 + 4.0 and hy2 >= wy1 - 4.0
+                        for _, (hx1, hy1, hx2, hy2) in win_entries[:idx]
+                    )
+                    if not occluded:
+                        f.x, f.y = x, y
+                        self._stick(f, wy1, whwnd)
+                        self.stuck.append(f)
+                        landed = True
+                        break
+            if landed:
+                continue
 
             if fg and fg_hwnd:
                 wx1, wy1, wx2, _ = fg
@@ -292,7 +317,6 @@ class SnowSystem:
             still_falling.append(f)
 
         self.falling = still_falling
-
 
 class FairyLights:
     def __init__(self, canvas, monitors, vx, vy):

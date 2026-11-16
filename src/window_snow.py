@@ -2,7 +2,10 @@
 import math
 import random
 
-def _subtract_intervals(base: tuple[float, float], blockers: list[tuple[float, float]]) -> list[tuple[float, float]]:
+
+def _subtract_intervals(
+    base: tuple[float, float], blockers: list[tuple[float, float]]
+) -> list[tuple[float, float]]:
     """Returns visible horizontal segments of `base` after subtracting occluded `blockers`."""
     spans = [base]
     for bx1, bx2 in blockers:
@@ -20,14 +23,15 @@ def _subtract_intervals(base: tuple[float, float], blockers: list[tuple[float, f
             break
     return [s for s in spans if (s[1] - s[0]) >= 44.0]
 
+
 class WindowSnowLedges:
     """Renders sculpted snow drifts & icicles perched on visible top edges of open windows."""
 
     def __init__(self, canvas):
         self.canvas = canvas
         self.enabled = True
-        # key -> {"rect": (x1, y1, x2, y2), "depth": float, "seed": int, "items": list[int]}
-        self._drifts: dict[tuple[int, int], dict] = {}
+        # hwnd_key -> {"rect": (x1, y1, x2, y2), "depth": float, "seed": int, "items": list[int]}
+        self._drifts: dict[int, dict] = {}
         # Falling snow clumps when a snow-capped window moves or closes
         self._clumps: list[list] = []
 
@@ -46,30 +50,51 @@ class WindowSnowLedges:
             self.clear()
 
     @staticmethod
-    def _extract_rects(env_rects) -> list[tuple[float, float, float, float]]:
-        """Normalizes window rects from WindowTracker.get_env_rects()."""
-        raw = []
+    def _extract_entries(
+        env_rects,
+    ) -> list[tuple[int, tuple[float, float, float, float]]]:
+        """Normalizes (hwnd, (x1, y1, x2, y2)) entries from WindowTracker.get_env_rects()."""
+        entries: list[tuple[int, tuple[float, float, float, float]]] = []
         if isinstance(env_rects, dict):
+            raw_entries = env_rects.get("window_entries")
+            if raw_entries:
+                for hwnd, r in raw_entries:
+                    x1, y1, x2, y2 = float(r[0]), float(r[1]), float(r[2]), float(r[3])
+                    if (x2 - x1) >= 160.0 and (y2 - y1) >= 80.0 and y1 >= 4.0:
+                        entries.append((int(hwnd), (x1, y1, x2, y2)))
+                return entries
+
+            raw = None
             for key in ("windows", "rects", "window_rects", "ledges"):
-                if key in env_rects and env_rects[key]:
+                if env_rects.get(key):
                     raw = env_rects[key]
                     break
+            if raw is None and env_rects.get("fg"):
+                fg = env_rects["fg"]
+                fg_id = int(env_rects.get("fg_hwnd") or 1)
+                x1, y1, x2, y2 = float(fg[0]), float(fg[1]), float(fg[2]), float(fg[3])
+                if (x2 - x1) >= 160.0 and (y2 - y1) >= 80.0 and y1 >= 4.0:
+                    return [(fg_id, (x1, y1, x2, y2))]
+                return []
         elif isinstance(env_rects, (list, tuple)):
             raw = env_rects
+        else:
+            return []
 
-        rects: list[tuple[float, float, float, float]] = []
-        for r in raw:
+        for idx, r in enumerate(raw or []):
             if isinstance(r, (list, tuple)) and len(r) >= 4:
                 x1, y1, x2, y2 = float(r[0]), float(r[1]), float(r[2]), float(r[3])
             elif hasattr(r, "left") and hasattr(r, "top"):
                 x1, y1, x2, y2 = float(r.left), float(r.top), float(r.right), float(r.bottom)
             else:
                 continue
-            if (x2 - x1) >= 160.0 and (y2 - y1) >= 80.0 and y1 >= 22.0:
-                rects.append((x1, y1, x2, y2))
-        return rects
+            if (x2 - x1) >= 160.0 and (y2 - y1) >= 80.0 and y1 >= 4.0:
+                entries.append((idx + 1, (x1, y1, x2, y2)))
+        return entries
 
-    def _shatter_drift(self, rect: tuple[float, float, float, float], depth: float) -> None:
+    def _shatter_drift(
+        self, rect: tuple[float, float, float, float], depth: float
+    ) -> None:
         """Turns a displaced snow cap into tumbling snow clumps."""
         x1, y1, x2, _ = rect
         span = max(40.0, x2 - x1)
@@ -106,11 +131,10 @@ class WindowSnowLedges:
     ) -> list[int]:
         items: list[int] = []
         rng = random.Random(seed)
-        h_max = 3.0 + 7.5 * depth
+        h_max = 3.5 + 7.5 * depth
         step = 18.0
         n = max(3, int((x2 - x1) / step))
 
-        # Sculpted top ridge + slightly overhanging underside lip
         top_pts: list[float] = [x1, y]
         bot_pts: list[float] = []
         for i in range(n + 1):
@@ -127,7 +151,6 @@ class WindowSnowLedges:
         for px, py in reversed(bot_pts):
             poly_pts.extend((px, py))
 
-        # Cool ice shadow base + crisp white snow crest
         shadow = self.canvas.create_polygon(
             *poly_pts, smooth=True, fill="#BAE6FD", outline=""
         )
@@ -146,8 +169,7 @@ class WindowSnowLedges:
         )
         items.append(crest)
 
-        # Delicate icicles once snow reaches 55% accumulation
-        if depth >= 0.55 and (x2 - x1) >= 120:
+        if depth >= 0.50 and (x2 - x1) >= 120:
             icicle_count = min(5, max(2, int((x2 - x1) / 140)))
             for idx in range(icicle_count):
                 frac = (idx + 0.35 + 0.3 * rng.random()) / icicle_count
@@ -176,52 +198,47 @@ class WindowSnowLedges:
 
         self._update_clumps()
 
-        # Re-evaluate window ledges every 3 frames (10 Hz) to keep CPU negligible
         if tick % 3 != 0:
             return
 
-        rects = self._extract_rects(env_rects)
-        # Keep top 8 visible windows in Z-order (front-to-back)
-        rects = rects[:8]
+        entries = self._extract_entries(env_rects)[:8]
+        new_drifts: dict[int, dict] = {}
+        matched_keys: set[int] = set()
 
-        new_drifts: dict[tuple[int, int], dict] = {}
-        matched_keys: set[tuple[int, int]] = set()
-
-        for idx, rect in enumerate(rects):
+        for idx, (key, rect) in enumerate(entries):
             x1, y1, x2, y2 = rect
-            # Find any higher-Z windows covering this window's top edge y1
             blockers = []
-            for higher in rects[:idx]:
+            for _, higher in entries[:idx]:
                 hx1, hy1, hx2, hy2 = higher
-                if hy1 <= y1 + 8.0 and hy2 >= y1 - 4.0:
+                if hy1 <= y1 + 10.0 and hy2 >= y1 - 4.0:
                     blockers.append((hx1, hx2))
 
             visible_spans = _subtract_intervals((x1 + 6.0, x2 - 6.0), blockers)
             if not visible_spans:
                 continue
 
-            # Match against previous drift by approximate window width & left-edge bucket
-            key = (int(round(x1 / 16.0)), int(round((x2 - x1) / 24.0)))
             prev = self._drifts.get(key)
             if prev is not None:
                 px1, py1, px2, _ = prev["rect"]
-                moved = abs(x1 - px1) > 10.0 or abs(y1 - py1) > 10.0 or abs(x2 - px2) > 14.0
+                moved = (
+                    abs(x1 - px1) > 8.0
+                    or abs(y1 - py1) > 8.0
+                    or abs(x2 - px2) > 12.0
+                )
+                for it in prev["items"]:
+                    self.canvas.delete(it)
                 if moved:
-                    for it in prev["items"]:
-                        self.canvas.delete(it)
                     if prev["depth"] > 0.2:
                         self._shatter_drift(prev["rect"], prev["depth"])
-                    depth = 0.08
+                    depth = 0.14 if snow_active else 0.0
                     seed = random.randint(1, 9999)
                 else:
-                    for it in prev["items"]:
-                        self.canvas.delete(it)
-                    rate = 0.014 if snow_active else -0.008
+                    rate = 0.018 if snow_active else -0.008
                     depth = max(0.0, min(1.0, prev["depth"] + rate))
                     seed = prev["seed"]
                 matched_keys.add(key)
             else:
-                depth = 0.08 if snow_active else 0.0
+                depth = 0.16 if snow_active else 0.0
                 seed = random.randint(1, 9999)
 
             if depth <= 0.02:
@@ -238,7 +255,6 @@ class WindowSnowLedges:
                 "items": items,
             }
 
-        # Any window that closed or minimized sheds its snow cap
         for old_key, old_entry in self._drifts.items():
             if old_key not in matched_keys:
                 for it in old_entry["items"]:
