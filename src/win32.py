@@ -1,6 +1,7 @@
 # src/win32.py
 import ctypes
 from ctypes import wintypes
+import os
 import threading
 import winreg
 
@@ -24,6 +25,7 @@ WS_EX_LAYERED = 0x00080000
 WS_EX_NOACTIVATE = 0x08000000
 
 HWND_TOPMOST = -1
+HWND_BOTTOM = 1
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
 SWP_NOACTIVATE = 0x0010
@@ -77,6 +79,7 @@ _MONITOR_ENUM_PROC = ctypes.WINFUNCTYPE(
     wintypes.LPARAM,
 )
 
+
 class MONITORINFO(ctypes.Structure):
     _fields_ = [
         ("cbSize", wintypes.DWORD),
@@ -85,11 +88,69 @@ class MONITORINFO(ctypes.Structure):
         ("dwFlags", wintypes.DWORD),
     ]
 
+
 class LASTINPUTINFO(ctypes.Structure):
     _fields_ = [
         ("cbSize", wintypes.UINT),
         ("dwTime", wintypes.DWORD),
     ]
+
+
+class _KNOWNFOLDERID(ctypes.Structure):
+    _fields_ = [
+        ("Data1", ctypes.c_ulong),
+        ("Data2", ctypes.c_ushort),
+        ("Data3", ctypes.c_ushort),
+        ("Data4", ctypes.c_ubyte * 8),
+    ]
+
+
+def get_windows_music_dir() -> str:
+    """Resolves the standard Windows Music library folder (FOLDERID_Music)."""
+    try:
+        # FOLDERID_Music = {4BD8D571-6D19-48D3-BE97-422220080E43}
+        fid = _KNOWNFOLDERID(
+            0x4BD8D571,
+            0x6D19,
+            0x48D3,
+            (ctypes.c_ubyte * 8)(0xBE, 0x97, 0x42, 0x22, 0x20, 0x08, 0x0E, 0x43),
+        )
+        p_path = ctypes.c_void_p()
+        shell32.SHGetKnownFolderPath.argtypes = [
+            ctypes.POINTER(_KNOWNFOLDERID),
+            wintypes.DWORD,
+            wintypes.HANDLE,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        shell32.SHGetKnownFolderPath.restype = ctypes.HRESULT
+        hr = shell32.SHGetKnownFolderPath(ctypes.byref(fid), 0, None, ctypes.byref(p_path))
+        if hr == 0 and p_path.value:
+            try:
+                path = ctypes.wstring_at(p_path.value)
+                if path:
+                    return path
+            finally:
+                ctypes.windll.ole32.CoTaskMemFree(p_path)
+    except Exception:
+        pass
+    return os.path.join(os.path.expanduser("~"), "Music")
+
+
+def place_window_on_desktop(hwnd: int) -> None:
+    """Keeps a window at the bottom of normal Z-order (above desktop, below all apps)."""
+    try:
+        user32.SetWindowPos(
+            hwnd,
+            HWND_BOTTOM,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+    except Exception:
+        pass
+
 
 def enable_per_monitor_dpi() -> None:
     try:
@@ -106,6 +167,7 @@ def enable_per_monitor_dpi() -> None:
             except Exception:
                 pass
 
+
 def trim_working_set() -> None:
     try:
         kernel32.GetCurrentProcess.restype = wintypes.HANDLE
@@ -114,6 +176,7 @@ def trim_working_set() -> None:
         psapi.EmptyWorkingSet(kernel32.GetCurrentProcess())
     except Exception:
         pass
+
 
 def is_workstation_locked() -> bool:
     try:
@@ -129,6 +192,7 @@ def is_workstation_locked() -> bool:
     except Exception:
         return False
 
+
 def get_idle_seconds() -> float:
     try:
         lii = LASTINPUTINFO()
@@ -142,6 +206,7 @@ def get_idle_seconds() -> float:
         pass
     return 0.0
 
+
 def uses_fahrenheit() -> bool:
     try:
         LOCALE_USER_DEFAULT = 0x0400
@@ -152,6 +217,7 @@ def uses_fahrenheit() -> bool:
     except Exception:
         pass
     return False
+
 
 def is_reduce_motion_enabled() -> bool:
     """True if the user has animations turned off in Windows accessibility settings."""
@@ -165,6 +231,7 @@ def is_reduce_motion_enabled() -> bool:
         pass
     return False
 
+
 def get_monitors() -> list:
     monitors = []
 
@@ -175,6 +242,7 @@ def get_monitors() -> list:
 
     user32.EnumDisplayMonitors(None, None, _MONITOR_ENUM_PROC(cb), 0)
     return monitors
+
 
 def get_monitor_rect_for_hwnd(hwnd: int) -> tuple[int, int, int, int] | None:
     try:
@@ -189,6 +257,7 @@ def get_monitor_rect_for_hwnd(hwnd: int) -> tuple[int, int, int, int] | None:
     except Exception:
         pass
     return None
+
 
 def get_work_area_for_point(x: int, y: int) -> tuple[int, int, int, int]:
     try:
@@ -249,8 +318,10 @@ def apply_rounded_corners(hwnd: int) -> None:
     except Exception:
         pass
 
+
 _AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _AUTOSTART_NAME = "ChristmasOverlay"
+
 
 def set_autostart(enabled: bool, exe: str) -> bool:
     try:
@@ -278,6 +349,7 @@ def is_autostart_enabled() -> bool:
             return bool(val)
     except Exception:
         return False
+
 
 class GlobalHotkey:
     """Registers a global hotkey on a dedicated message-pump thread."""
@@ -324,6 +396,7 @@ class GlobalHotkey:
             except Exception:
                 pass
 
+
 class DWM_COLORIZATION_PARAMS(ctypes.Structure):
     _fields_ = [
         ("clrColor", wintypes.DWORD),
@@ -335,6 +408,7 @@ class DWM_COLORIZATION_PARAMS(ctypes.Structure):
         ("fOpaque", wintypes.BOOL),
     ]
 
+
 def _build_accent_palette(r: int, g: int, b: int) -> bytes:
     factors = [1.45, 1.30, 1.15, 1.0, 0.85, 0.70, 0.55, 0.40]
     out = bytearray()
@@ -343,6 +417,7 @@ def _build_accent_palette(r: int, g: int, b: int) -> bytes:
             (min(255, int(r * f)), min(255, int(g * f)), min(255, int(b * f)), 0xFF)
         )
     return bytes(out)
+
 
 def set_windows_accent(r: int, g: int, b: int, prevalence: int = 1) -> None:
     abgr = (0xFF << 24) | (b << 16) | (g << 8) | r
@@ -375,6 +450,7 @@ def set_windows_accent(r: int, g: int, b: int, prevalence: int = 1) -> None:
     apply_dwm_colorization(argb)
     broadcast_setting_change()
 
+
 def apply_dwm_colorization(argb: int) -> None:
     try:
         dwmapi = ctypes.windll.dwmapi
@@ -389,6 +465,7 @@ def apply_dwm_colorization(argb: int) -> None:
         fn(ctypes.byref(p), True)
     except Exception:
         pass
+
 
 def broadcast_setting_change() -> None:
     try:

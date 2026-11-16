@@ -6,6 +6,7 @@ import datetime
 import os
 import queue
 import random
+import subprocess
 import sys
 import threading
 import time
@@ -23,7 +24,7 @@ from effects import (
     WeatherMonitor,
 )
 from events import RandomEventSystem
-from paths import exe_path, is_frozen
+from paths import exe_path, is_frozen, resource_path
 from single_instance import SingleInstance
 from state import AppState, FROST_MODES, MUSIC_DIR, SNOW_MODES, SPARKLE_MODES
 from system_theme import SystemThemeManager
@@ -56,9 +57,11 @@ from win32 import (
     enable_per_monitor_dpi,
     get_idle_seconds,
     get_monitors,
+    get_work_area_for_point,
     is_autostart_enabled,
     is_workstation_locked,
     kernel32,
+    place_window_on_desktop,
     set_autostart,
     trim_working_set,
     user32,
@@ -70,7 +73,6 @@ if is_frozen():
     _log_path = os.path.join(_exe_dir, "christmas_overlay.log")
     _mode = "w" if (os.path.exists(_log_path) and os.path.getsize(_log_path) > 1_000_000) else "a"
     sys.stdout = sys.stderr = open(_log_path, _mode, buffering=1, encoding="utf-8")
-    # Recover from a previous update if it left the exe missing
     try:
         updater.recover_previous_install()
     except Exception:
@@ -102,38 +104,63 @@ class ChristmasOverlay:
     ENV_INTERVAL = 6
     FULLSCREEN_INTERVAL = 30
 
-    def __init__(self):
+    def __init__(self, instance_guard: SingleInstance | None = None):
+        self._guard = instance_guard
         enable_per_monitor_dpi()
         self.state = AppState.load()
-        # Registry is source of truth for auto-start
         self.state.start_with_windows = is_autostart_enabled()
-        # Seasonal auto-hide
         if self.state.auto_seasonal and not _is_in_season():
             self.state.visible = False
 
         self.theme_mgr = SystemThemeManager()
-        self.audio = AudioManager()
         self.queue = queue.Queue()
 
         self.vx, self.vy, self.vw, self.vh = self._query_virtual_screen()
         self.monitors = get_monitors() or [(0, 0, self.vw, self.vh)]
 
+        # 1. Topmost overlay window (snow, fairy lights, frost, countdown, advent, sparkles, toasts)
         self.root = tk.Tk()
         self.root.overrideredirect(True)
         self.root.geometry(f"{self.vw}x{self.vh}+{self.vx}+{self.vy}")
         self.root.attributes("-topmost", True)
         self.root.attributes("-transparentcolor", CHROMA_KEY)
         self.root.configure(bg=CHROMA_KEY)
+        try:
+            ico = resource_path("icon.ico")
+            if os.path.exists(ico):
+                self.root.iconbitmap(ico)
+        except Exception:
+            pass
 
         self.canvas = tk.Canvas(
             self.root, width=self.vw, height=self.vh, bg=CHROMA_KEY, highlightthickness=0
         )
         self.canvas.pack()
 
+        # 2. Desktop-only window (aurora, Santa's sleigh, shooting stars, Ho Ho Ho bubbles)
+        self.desktop_root = tk.Toplevel(self.root)
+        self.desktop_root.overrideredirect(True)
+        self.desktop_root.geometry(f"{self.vw}x{self.vh}+{self.vx}+{self.vy}")
+        self.desktop_root.attributes("-transparentcolor", CHROMA_KEY)
+        self.desktop_root.configure(bg=CHROMA_KEY)
+
+        self.desktop_canvas = tk.Canvas(
+            self.desktop_root, width=self.vw, height=self.vh, bg=CHROMA_KEY, highlightthickness=0
+        )
+        self.desktop_canvas.pack()
+
         self.root.update_idletasks()
+        self.desktop_root.update_idletasks()
         self.hwnd = user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
+        self.desktop_hwnd = (
+            user32.GetParent(self.desktop_root.winfo_id()) or self.desktop_root.winfo_id()
+        )
         self._apply_win32_styles()
 
+        self.audio = AudioManager(
+            initial_volume=self.state.music_volume,
+            on_music_update=lambda: self.root.after(0, self.tray.popup.refresh),
+        )
         self.tracker = WindowTracker(self.hwnd, self.vx, self.vy)
         self.weather = WeatherMonitor(
             on_update=lambda: self.root.after(0, self.tray.popup.refresh)
@@ -147,6 +174,10 @@ class ChristmasOverlay:
         self._restored = False
         self._update_available = None
         self._update_checking = False
+        self._update_downloading = False
+        self._update_status_note = ""
+        self._toast_tag: str | None = None
+        self._toast_until = 0
         self._idle_sec = 0.0
         self.mouse_down = False
         self.rbutton_down = False
@@ -167,6 +198,41 @@ class ChristmasOverlay:
             self.hotkey.register(MOD_CONTROL | MOD_ALT, VK_X)
 
         trim_working_set()
+
+    def show_toast(self, msg: str, duration_s: float = 4.0) -> None:
+        """Displays a crisp on-screen toast pill and also triggers a tray notification."""
+        self.tray.notify(msg)
+        if self._toast_tag:
+            self.canvas.delete(self._toast_tag)
+            self._toast_tag = None
+        wl, _, wr, wb = get_work_area_for_point(0, 0)
+        cx = (wl + wr) // 2 - self.vx
+        cy = (wb - self.vy) - 44
+        tag = f"toast_{self.tick}"
+        txt = self.canvas.create_text(
+            cx,
+            cy,
+            text=msg,
+            fill="#F8FAFC",
+            font=("Segoe UI", 10, "bold"),
+            anchor="center",
+        )
+        self.canvas.addtag_withtag(tag, txt)
+        bb = self.canvas.bbox(txt)
+        if bb:
+            bg = self.canvas.create_rectangle(
+                bb[0] - 14,
+                bb[1] - 7,
+                bb[2] + 14,
+                bb[3] + 7,
+                fill="#0F172A",
+                outline="#FBBF24",
+                width=1,
+            )
+            self.canvas.tag_raise(txt)
+            self.canvas.addtag_withtag(tag, bg)
+        self._toast_tag = tag
+        self._toast_until = self.tick + int(duration_s * 30)
 
     def _hotkey_toggle(self) -> None:
         self.queue.put(lambda: self._toggle_attr("visible", lambda _: self._sync_window_visibility()))
@@ -217,6 +283,7 @@ class ChristmasOverlay:
             if prev_frost
             else (1.0 if self.state.frost_mode_idx == 1 else 0.0)
         )
+        # Topmost overlay canvas
         self.canvas.delete("all")
         self.border = FrostBorder(self.canvas, self.vw, self.vh, initial_progress)
         self.lights = FairyLights(self.canvas, self.monitors, self.vx, self.vy)
@@ -228,8 +295,13 @@ class ChristmasOverlay:
             self.canvas, self.vx, self.vy, self.state.countdown_visible, self.state.user_name
         )
         self.sparkles = SparkleSystem(self.canvas)
-        self.events = RandomEventSystem(self.canvas, self.vw, self.vh)
         self.advent = AdventCalendar(self.canvas, self.vx, self.vy)
+
+        # Desktop-only canvas (behind all open application windows)
+        self.desktop_canvas.delete("all")
+        self.events = RandomEventSystem(
+            self.desktop_canvas, self.vw, self.vh, self.vx, self.vy
+        )
 
     def _apply_initial_system_state(self) -> None:
         if self.state.wallpaper_enabled:
@@ -242,7 +314,7 @@ class ChristmasOverlay:
         if self.state.music_enabled:
             if not self.audio.set_music_enabled(True):
                 self.state.music_enabled = False
-        elif self.state.ambient_bells_enabled:
+        if self.state.ambient_bells_enabled:
             self.audio.set_ambient_chimes(True)
 
     def _toggle_attr(self, attr: str, side_effect=None) -> None:
@@ -251,6 +323,17 @@ class ChristmasOverlay:
         if side_effect:
             side_effect(val)
         self.state.notify()
+
+    def _update_button_label(self) -> str:
+        if self._update_downloading:
+            return "Downloading update..."
+        if self._update_checking:
+            return "Checking for updates..."
+        if self._update_available:
+            return f"Install Update (v{self._update_available['version']})"
+        if self._update_status_note:
+            return self._update_status_note
+        return "Check for Updates"
 
     def _build_tray_actions(self) -> dict:
         return {
@@ -272,16 +355,22 @@ class ChristmasOverlay:
             ),
             "toggle_ambient_bells": self.toggle_ambient_bells,
             "toggle_music": self.toggle_music,
+            "music_play_pause": self.music_play_pause,
+            "music_next": self.music_next,
+            "music_prev": self.music_prev,
+            "music_vol_up": lambda: self.adjust_music_volume(10),
+            "music_vol_down": lambda: self.adjust_music_volume(-10),
+            "music_status": lambda: {
+                "playing": self.audio.is_playing,
+                "paused": self.audio.is_paused,
+                "track": self.audio.current_track_name,
+            },
             "open_music_folder": self.open_music_folder,
             "toggle_wallpaper": self.toggle_wallpaper,
             "toggle_accent": self.toggle_accent,
             "toggle_autostart": self.toggle_autostart,
             "toggle_seasonal": self.toggle_seasonal,
-            "update_label": lambda: (
-                f"Install Update (v{self._update_available['version']})"
-                if self._update_available
-                else "Check for Updates"
-            ),
+            "update_label": self._update_button_label,
             "handle_update": lambda: (
                 self._install_update()
                 if self._update_available
@@ -319,11 +408,8 @@ class ChristmasOverlay:
 
     def toggle_music(self) -> None:
         if not self.state.music_enabled:
-            if self.state.ambient_bells_enabled:
-                self.state.ambient_bells_enabled = False
-                self.audio.set_ambient_chimes(False)
             if not self.audio.set_music_enabled(True):
-                self.tray.notify("Add .wav files to the music folder first.")
+                self.show_toast("No audio files found in your Windows Music folder.")
                 self.state.notify()
                 return
             self.state.music_enabled = True
@@ -332,35 +418,59 @@ class ChristmasOverlay:
             self.state.music_enabled = False
         self.state.notify()
 
+    def music_play_pause(self) -> None:
+        if not self.audio.toggle_play_pause():
+            self.show_toast("No audio files found in your Windows Music folder.")
+            return
+        self.state.music_enabled = self.audio.music_on
+        self.state.notify()
+
+    def music_next(self) -> None:
+        if not self.audio.next_track():
+            self.show_toast("No audio files found in your Windows Music folder.")
+            return
+        self.state.music_enabled = True
+        self.state.notify()
+
+    def music_prev(self) -> None:
+        if not self.audio.prev_track():
+            self.show_toast("No audio files found in your Windows Music folder.")
+            return
+        self.state.music_enabled = True
+        self.state.notify()
+
+    def adjust_music_volume(self, delta: int) -> None:
+        new_vol = max(0, min(100, self.state.music_volume + delta))
+        self.state.music_volume = new_vol
+        self.audio.set_volume(new_vol)
+        self.state.notify()
+
     def toggle_ambient_bells(self) -> None:
-        if not self.state.ambient_bells_enabled:
-            if self.state.music_enabled:
-                self.audio.set_music_enabled(False)
-                self.state.music_enabled = False
-            self.state.ambient_bells_enabled = True
-            self.audio.set_ambient_chimes(True)
-        else:
-            self.state.ambient_bells_enabled = False
-            self.audio.set_ambient_chimes(False)
+        self.state.ambient_bells_enabled = not self.state.ambient_bells_enabled
+        self.audio.set_ambient_chimes(self.state.ambient_bells_enabled)
         self.state.notify()
 
     def open_music_folder(self) -> None:
         try:
-            os.makedirs(MUSIC_DIR, exist_ok=True)
-            os.startfile(MUSIC_DIR)
+            target = os.path.normpath(MUSIC_DIR)
+            os.makedirs(target, exist_ok=True)
+            subprocess.Popen(["explorer", target])
         except Exception:
-            self.tray.notify("Could not open music folder.")
+            try:
+                os.startfile(MUSIC_DIR)
+            except Exception:
+                self.show_toast("Could not open Windows Music folder.")
 
     def toggle_autostart(self) -> None:
         if not is_frozen():
-            self.tray.notify("Auto-start requires the packaged .exe.")
+            self.show_toast("Auto-start requires the packaged .exe.")
             return
         new = not self.state.start_with_windows
         if set_autostart(new, exe_path()):
             self.state.start_with_windows = new
             self.state.notify()
         else:
-            self.tray.notify("Failed to update Windows startup registry.")
+            self.show_toast("Failed to update Windows startup registry.")
 
     def toggle_seasonal(self) -> None:
         self.state.auto_seasonal = not self.state.auto_seasonal
@@ -374,7 +484,7 @@ class ChristmasOverlay:
             ok, err = self.theme_mgr.apply_wallpaper(self.vw, self.vh)
             self.state.wallpaper_enabled = ok
             if not ok and err:
-                self.tray.notify(err)
+                self.show_toast(err)
         else:
             self.theme_mgr.restore_wallpaper()
             self.state.wallpaper_enabled = False
@@ -390,19 +500,25 @@ class ChristmasOverlay:
         self.state.notify()
 
     def _apply_win32_styles(self) -> None:
-        style = _GetWindowLong(self.hwnd, GWL_EXSTYLE)
-        style |= WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
-        _SetWindowLong(self.hwnd, GWL_EXSTYLE, style)
+        ex_flags = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+        for hwnd in (self.hwnd, self.desktop_hwnd):
+            style = _GetWindowLong(hwnd, GWL_EXSTYLE)
+            _SetWindowLong(hwnd, GWL_EXSTYLE, style | ex_flags)
         self._assert_topmost()
+        place_window_on_desktop(self.desktop_hwnd)
 
     def _rebuild_overlay(self) -> None:
         self.vx, self.vy, self.vw, self.vh = self._query_virtual_screen()
         self.monitors = get_monitors() or [(0, 0, self.vw, self.vh)]
+        geo = f"{self.vw}x{self.vh}+{self.vx}+{self.vy}"
         self.canvas.configure(width=self.vw, height=self.vh)
-        self.root.geometry(f"{self.vw}x{self.vh}+{self.vx}+{self.vy}")
+        self.root.geometry(geo)
+        self.desktop_canvas.configure(width=self.vw, height=self.vh)
+        self.desktop_root.geometry(geo)
         self.tracker.set_origin(self.vx, self.vy)
         self._build_scene()
         self._assert_topmost()
+        place_window_on_desktop(self.desktop_hwnd)
         trim_working_set()
 
     def _assert_topmost(self) -> None:
@@ -418,15 +534,20 @@ class ChristmasOverlay:
         is_shown = self.root.state() != "withdrawn"
         if should_show and not is_shown:
             self.root.deiconify()
+            self.desktop_root.deiconify()
             self.root.update_idletasks()
+            self.desktop_root.update_idletasks()
             self._apply_win32_styles()
         elif not should_show and is_shown:
             self.root.withdraw()
+            self.desktop_root.withdraw()
 
     def _check_updates_async(self, notify_if_none: bool = False) -> None:
-        if self._update_checking:
+        if self._update_checking or self._update_downloading:
             return
         self._update_checking = True
+        self._update_status_note = ""
+        self.tray.popup.refresh()
 
         def worker():
             res = updater.check_for_update()
@@ -434,26 +555,46 @@ class ChristmasOverlay:
             def done():
                 self._update_checking = False
                 self._update_available = res
-                self.tray.popup.refresh()
                 if res:
-                    self.tray.notify(f"Version {res['version']} is available.")
+                    self._update_status_note = ""
+                    self.show_toast(f"Update v{res['version']} is available! Click Install Update.")
                 elif notify_if_none:
-                    self.tray.notify("You're on the latest version.")
+                    self._update_status_note = "Up to date (Latest)"
+                    self.show_toast("You're on the latest version!")
+                    self.root.after(4000, self._clear_update_note)
+                self.tray.popup.refresh()
 
             self.root.after(0, done)
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _clear_update_note(self) -> None:
+        self._update_status_note = ""
+        self.tray.popup.refresh()
+
     def _install_update(self) -> None:
-        if not self._update_available:
+        if not self._update_available or self._update_downloading:
             return
+        if not is_frozen():
+            self.show_toast("Self-update only works from the packaged .exe.")
+            return
+
         url = self._update_available["url"]
+        ver = self._update_available["version"]
+        self._update_downloading = True
+        self.tray.popup.refresh()
+        self.show_toast(f"Downloading v{ver}...")
 
         def worker():
             try:
                 new_path = updater.download_exe(url)
             except Exception as e:
-                self.root.after(0, lambda: self.tray.notify(f"Download failed: {e}"))
+                def fail():
+                    self._update_downloading = False
+                    self.tray.popup.refresh()
+                    self.show_toast(f"Download failed: {e}")
+
+                self.root.after(0, fail)
                 return
 
             def go():
@@ -461,9 +602,23 @@ class ChristmasOverlay:
                 self.weather.stop()
                 self._restore_system_preferences()
                 self.tray.stop()
+                try:
+                    self.hotkey.stop()
+                except Exception:
+                    pass
+                if self._guard:
+                    try:
+                        self._guard.release()
+                    except Exception:
+                        pass
                 updater.apply_update_and_restart(new_path)
-                self.canvas.delete("all")
-                self.root.destroy()
+                try:
+                    self.canvas.delete("all")
+                    self.desktop_canvas.delete("all")
+                    self.root.destroy()
+                except Exception:
+                    pass
+                os._exit(0)
 
             self.root.after(0, go)
 
@@ -496,6 +651,10 @@ class ChristmasOverlay:
         self.tick += 1
         self.env_counter += 1
 
+        if self._toast_tag and self.tick >= self._toast_until:
+            self.canvas.delete(self._toast_tag)
+            self._toast_tag = None
+
         if self.tick % self.FULLSCREEN_INTERVAL == 0:
             self._locked = is_workstation_locked()
             self._idle_sec = get_idle_seconds()
@@ -522,6 +681,8 @@ class ChristmasOverlay:
 
         if self.tick % 180 == 0 and not self.tray.popup.is_open:
             self._assert_topmost()
+            place_window_on_desktop(self.desktop_hwnd)
+
         if self.state.lights_visible and self.tick % 4 == 0:
             self.lights.update(self.tick)
 
@@ -592,6 +753,7 @@ class ChristmasOverlay:
             pass
         try:
             self.canvas.delete("all")
+            self.desktop_canvas.delete("all")
             self.root.destroy()
         except Exception:
             pass
@@ -602,6 +764,6 @@ if __name__ == "__main__":
     try:
         if guard.already_running:
             sys.exit(0)
-        ChristmasOverlay().run()
+        ChristmasOverlay(guard).run()
     finally:
         guard.release()

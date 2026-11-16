@@ -1,11 +1,19 @@
 # ChristmasOverlay.spec
 # -*- mode: python ; coding: utf-8 -*-
+import os
+
+ROOT = os.path.abspath(os.path.join(SPECPATH, "..")) if os.path.basename(SPECPATH).lower() == "tests" else os.path.abspath(SPECPATH)
+SRC_DIR = os.path.join(ROOT, "src")
+ASSETS_DIR = os.path.join(ROOT, "assets")
 
 a = Analysis(
-    ["src/main.pyw"],
-    pathex=["src"],
+    [os.path.join(SRC_DIR, "main.pyw")],
+    pathex=[SRC_DIR],
     binaries=[],
-    datas=[("assets/icon.png", ".")],
+    datas=[
+        (os.path.join(ASSETS_DIR, "icon.png"), "."),
+        (os.path.join(ASSETS_DIR, "icon.ico"), "."),
+    ],
     hiddenimports=["PIL._tkinter_finder", "pystray._win32"],
     hookspath=[],
     hooksconfig={},
@@ -34,5 +42,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon="assets/icon.ico",
+    icon=os.path.join(ASSETS_DIR, "icon.ico"),
 )

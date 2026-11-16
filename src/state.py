@@ -1,6 +1,7 @@
 # src/state.py
 import json
 import os
+from win32 import get_windows_music_dir
 
 SNOW_MODES = [
     ("Gentle Flurry", 110),
@@ -15,10 +16,10 @@ CONFIG_DIR = os.path.join(
     os.getenv("LOCALAPPDATA") or os.path.expanduser("~"), "ChristmasOverlay"
 )
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
-MUSIC_DIR = os.path.join(CONFIG_DIR, "music")
+MUSIC_DIR = get_windows_music_dir()
 
 class AppState:
-    SCHEMA = 2
+    SCHEMA = 3
 
     def __init__(self):
         self.visible = True
@@ -31,6 +32,7 @@ class AppState:
         self.audio_enabled = False
         self.ambient_bells_enabled = False
         self.music_enabled = False
+        self.music_volume = 75
         self.wallpaper_enabled = False
         self.accent_enabled = False
         self.advent_enabled = True
@@ -65,6 +67,7 @@ class AppState:
             "audio_enabled": self.audio_enabled,
             "ambient_bells_enabled": self.ambient_bells_enabled,
             "music_enabled": self.music_enabled,
+            "music_volume": self.music_volume,
             "wallpaper_enabled": self.wallpaper_enabled,
             "accent_enabled": self.accent_enabled,
             "advent_enabled": self.advent_enabled,
@@ -100,6 +103,7 @@ class AppState:
             st.audio_enabled = bool(data.get("audio_enabled", st.audio_enabled))
             st.ambient_bells_enabled = bool(data.get("ambient_bells_enabled", st.ambient_bells_enabled))
             st.music_enabled = bool(data.get("music_enabled", st.music_enabled))
+            st.music_volume = max(0, min(100, int(data.get("music_volume", st.music_volume))))
             st.wallpaper_enabled = bool(data.get("wallpaper_enabled", st.wallpaper_enabled))
             st.accent_enabled = bool(data.get("accent_enabled", st.accent_enabled))
             st.advent_enabled = bool(data.get("advent_enabled", st.advent_enabled))

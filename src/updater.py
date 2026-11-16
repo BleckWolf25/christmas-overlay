@@ -24,6 +24,24 @@ def _parse_ver(v: str) -> tuple:
         parts.append(0)
     return tuple(parts[:3])
 
+
+def recover_previous_install() -> None:
+    """Restores ChristmasOverlay.exe from .old if an interrupted swap left it missing."""
+    if not is_frozen():
+        return
+    cur = exe_path()
+    old = cur + ".old"
+    if not os.path.exists(cur) and os.path.exists(old):
+        try:
+            os.replace(old, cur)
+        except Exception:
+            pass
+    elif os.path.exists(old):
+        try:
+            os.remove(old)
+        except Exception:
+            pass
+
 def check_for_update() -> dict | None:
     req = urllib.request.Request(
         GITHUB_API_LATEST,
@@ -55,6 +73,7 @@ def check_for_update() -> dict | None:
         "url": url,
         "notes": (data.get("body") or "")[:500],
     }
+
 
 def download_exe(url: str) -> str:
     target_dir = os.path.dirname(exe_path())
@@ -92,9 +111,10 @@ tasklist /fi "PID eq {pid}" 2>nul | find "{pid}" >nul && (
   ping -n 2 127.0.0.1 >nul
   goto wait
 )
+ping -n 2 127.0.0.1 >nul
 :swap
 set /a tries+=1
-if %tries% GTR 15 goto end
+if %tries% GTR 20 goto end
 if exist "{old}" del /f /q "{old}" >nul 2>&1
 move /y "{cur}" "{old}" >nul 2>&1
 if errorlevel 1 (

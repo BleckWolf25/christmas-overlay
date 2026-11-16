@@ -1,8 +1,10 @@
 # src/audio.py
-import glob
+import ctypes
+from ctypes import wintypes
 import io
 import math
 import os
+import queue
 import random
 import struct
 import tempfile
@@ -14,6 +16,23 @@ from state import MUSIC_DIR
 
 # Peaceful winter celesta / music-box notes (Hz): C5, D5, E5, G5, A5, C6
 CHIME_NOTES = [523.25, 587.33, 659.25, 783.99, 880.00, 1046.50]
+AUDIO_EXTENSIONS = (".mp3", ".wav", ".wma", ".m4a", ".flac", ".ogg")
+
+_winmm = ctypes.windll.winmm
+_winmm.mciSendStringW.argtypes = [
+    wintypes.LPCWSTR,
+    wintypes.LPWSTR,
+    wintypes.UINT,
+    wintypes.HANDLE,
+]
+_winmm.mciSendStringW.restype = wintypes.DWORD
+
+
+def _mci(cmd: str) -> tuple[int, str]:
+    buf = ctypes.create_unicode_buffer(256)
+    err = _winmm.mciSendStringW(cmd, buf, 256, None)
+    return int(err), buf.value
+
 
 def generate_bell_wav(freqs: list[float], note_spacing: float = 0.14) -> bytes:
     sr = 44100
@@ -44,32 +63,62 @@ def generate_bell_wav(freqs: list[float], note_spacing: float = 0.14) -> bytes:
     f.seek(0)
     return f.read()
 
-def _wav_duration(path: str) -> float:
-    try:
-        with wave.open(path, "r") as w:
-            rate = w.getframerate() or 44100
-            return max(0.5, w.getnframes() / rate)
-    except Exception:
-        return 3.0
 
-def _list_music_files() -> list[str]:
+def list_music_files() -> list[str]:
+    """Finds audio files in the user's Windows Music folder (top-level and 1 level deep)."""
     if not os.path.isdir(MUSIC_DIR):
         return []
-    return sorted(glob.glob(os.path.join(MUSIC_DIR, "*.wav")))
+    found: list[str] = []
+    try:
+        for entry in os.scandir(MUSIC_DIR):
+            if entry.name.startswith("."):
+                continue
+            if entry.is_file() and entry.name.lower().endswith(AUDIO_EXTENSIONS):
+                found.append(entry.path)
+            elif entry.is_dir():
+                try:
+                    for sub in os.scandir(entry.path):
+                        if (
+                            sub.is_file()
+                            and not sub.name.startswith(".")
+                            and sub.name.lower().endswith(AUDIO_EXTENSIONS)
+                        ):
+                            found.append(sub.path)
+                except OSError:
+                    continue
+    except OSError:
+        return []
+    return sorted(found, key=lambda p: os.path.basename(p).lower())
+
 
 class AudioManager:
-    def __init__(self):
+    _ALIAS = "xmas_bgm"
+
+    def __init__(self, initial_volume: int = 75, on_music_update=None):
         tmp = tempfile.gettempdir()
         pid = os.getpid()
         self.chime_path = os.path.join(tmp, f"xmas_chime_{pid}.wav")
         self.ambient_path = os.path.join(tmp, f"xmas_ambient_bell_{pid}.wav")
         self.ambient_chimes_on = False
         self.music_on = False
+        self.is_playing = False
+        self.is_paused = False
+        self.volume = max(0, min(100, int(initial_volume)))
+        self._on_music_update = on_music_update
+
+        self._playlist: list[str] = []
+        self._track_idx = 0
+        self._opened_path: str | None = None
 
         self._ambient_stop = threading.Event()
-        self._music_stop = threading.Event()
         self._ambient_thread: threading.Thread | None = None
-        self._music_thread: threading.Thread | None = None
+
+        self._cmd_q: queue.Queue[tuple[str, object]] = queue.Queue()
+        self._worker_stop = threading.Event()
+        self._music_thread = threading.Thread(
+            target=self._music_worker, daemon=True
+        )
+        self._music_thread.start()
 
         try:
             with open(self.chime_path, "wb") as f:
@@ -77,7 +126,25 @@ class AudioManager:
         except Exception:
             pass
 
+    @property
+    def current_track_name(self) -> str:
+        if not self._playlist:
+            files = list_music_files()
+            if not files:
+                return ""
+            self._playlist = files
+        idx = self._track_idx % len(self._playlist)
+        return os.path.splitext(os.path.basename(self._playlist[idx]))[0]
+
+    def _notify_music(self) -> None:
+        if self._on_music_update:
+            try:
+                self._on_music_update()
+            except Exception:
+                pass
+
     def play_chime(self) -> None:
+        """Plays UI feedback chime via WaveOut without disturbing MCI music playback."""
         try:
             winsound.PlaySound(
                 self.chime_path,
@@ -105,16 +172,15 @@ class AudioManager:
             self._ambient_thread.start()
         else:
             self._ambient_stop.set()
-            if not self.music_on:
-                try:
-                    winsound.PlaySound(None, 0)
-                except Exception:
-                    pass
+            try:
+                winsound.PlaySound(None, 0)
+            except Exception:
+                pass
 
     def _ambient_loop(self, stop_event: threading.Event) -> None:
         while not stop_event.is_set() and self.ambient_chimes_on:
-            if self.music_on:
-                if stop_event.wait(5.0):
+            if self.is_playing:
+                if stop_event.wait(4.0):
                     break
                 continue
             phrase = random.sample(CHIME_NOTES, 3)
@@ -133,64 +199,152 @@ class AudioManager:
                 break
 
     def set_music_enabled(self, on: bool) -> bool:
-        """Returns False if turning on but no .wav files are present."""
-        if on and not _list_music_files():
-            return False
-
-        if on == self.music_on and (
-            not on or (self._music_thread and self._music_thread.is_alive())
-        ):
-            return True
-
-        self.music_on = on
+        """Enables or disables music playback. Resumes cleanly if paused."""
         if on:
-            self._music_stop.set()
-            if self._music_thread and self._music_thread.is_alive():
-                self._music_thread.join(timeout=0.5)
-            stop_ev = threading.Event()
-            self._music_stop = stop_ev
-            self._music_thread = threading.Thread(
-                target=self._music_loop, args=(stop_ev,), daemon=True
-            )
-            self._music_thread.start()
+            files = list_music_files()
+            if not files:
+                return False
+            self._playlist = files
+            self.music_on = True
+            self._cmd_q.put(("play_or_resume", None))
         else:
-            self._music_stop.set()
-            if not self.ambient_chimes_on:
-                try:
-                    winsound.PlaySound(None, 0)
-                except Exception:
-                    pass
+            self.music_on = False
+            self._cmd_q.put(("pause", None))
         return True
 
-    def _music_loop(self, stop_event: threading.Event) -> None:
-        files = _list_music_files()
+    def toggle_play_pause(self) -> bool:
+        """Toggles between playing and paused without resetting or skipping tracks."""
+        if self.is_playing:
+            self.music_on = False
+            self._cmd_q.put(("pause", None))
+            return True
+        return self.set_music_enabled(True)
+
+    def next_track(self) -> bool:
+        files = list_music_files()
         if not files:
-            return
-        idx = 0
-        while not stop_event.is_set() and self.music_on:
-            if self.ambient_chimes_on:
-                if stop_event.wait(5.0):
-                    break
-                continue
-            path = files[idx % len(files)]
-            idx += 1
+            return False
+        self._playlist = files
+        self.music_on = True
+        self._cmd_q.put(("next", None))
+        return True
+
+    def prev_track(self) -> bool:
+        files = list_music_files()
+        if not files:
+            return False
+        self._playlist = files
+        self.music_on = True
+        self._cmd_q.put(("prev", None))
+        return True
+
+    def set_volume(self, volume: int) -> None:
+        self.volume = max(0, min(100, int(volume)))
+        self._cmd_q.put(("volume", self.volume))
+
+    def _mci_close(self) -> None:
+        _mci(f"stop {self._ALIAS}")
+        _mci(f"close {self._ALIAS}")
+        self._opened_path = None
+
+    def _mci_apply_volume(self) -> None:
+        mci_vol = int(self.volume * 10)  # MCI volume range is 0..1000
+        _mci(f"setaudio {self._ALIAS} volume to {mci_vol}")
+
+    def _mci_open_and_play(self, idx: int) -> bool:
+        if not self._playlist:
+            self._playlist = list_music_files()
+        if not self._playlist:
+            self.music_on = False
+            self.is_playing = False
+            self.is_paused = False
+            self._notify_music()
+            return False
+
+        self._track_idx = idx % len(self._playlist)
+        path = self._playlist[self._track_idx]
+        self._mci_close()
+
+        safe_path = path.replace('"', '""')
+        err, _ = _mci(f'open "{safe_path}" alias {self._ALIAS}')
+        if err != 0:
+            # Try skipping a corrupt/unsupported file once
+            if len(self._playlist) > 1:
+                self._track_idx = (self._track_idx + 1) % len(self._playlist)
+                safe_path = self._playlist[self._track_idx].replace('"', '""')
+                err, _ = _mci(f'open "{safe_path}" alias {self._ALIAS}')
+            if err != 0:
+                self.music_on = False
+                self.is_playing = False
+                self.is_paused = False
+                self._notify_music()
+                return False
+
+        self._opened_path = self._playlist[self._track_idx]
+        _mci(f"set {self._ALIAS} time format milliseconds")
+        self._mci_apply_volume()
+        _mci(f"play {self._ALIAS}")
+        self.is_playing = True
+        self.is_paused = False
+        self._notify_music()
+        return True
+
+    def _music_worker(self) -> None:
+        while not self._worker_stop.is_set():
             try:
-                dur = _wav_duration(path)
-                winsound.PlaySound(
-                    path,
-                    winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
-                )
-            except Exception:
-                dur = 3.0
-            # short gap between tracks
-            if stop_event.wait(dur + 1.5):
+                cmd, arg = self._cmd_q.get(timeout=0.45)
+            except queue.Empty:
+                # Poll end-of-track when playing
+                if self.music_on and self.is_playing and self._opened_path:
+                    err, mode = _mci(f"status {self._ALIAS} mode")
+                    if err == 0 and mode.strip().lower() == "stopped":
+                        self._mci_open_and_play(self._track_idx + 1)
+                continue
+
+            if cmd == "quit":
+                self._mci_close()
                 break
+            elif cmd == "play_or_resume":
+                if self.is_paused and self._opened_path and os.path.exists(self._opened_path):
+                    err, _ = _mci(f"resume {self._ALIAS}")
+                    if err != 0:
+                        _mci(f"play {self._ALIAS}")
+                    self._mci_apply_volume()
+                    self.is_playing = True
+                    self.is_paused = False
+                    self._notify_music()
+                elif not self.is_playing:
+                    self._mci_open_and_play(self._track_idx)
+            elif cmd == "pause":
+                if self.is_playing and self._opened_path:
+                    _mci(f"pause {self._ALIAS}")
+                    self.is_playing = False
+                    self.is_paused = True
+                    self._notify_music()
+            elif cmd == "next":
+                self._mci_open_and_play(self._track_idx + 1)
+            elif cmd == "prev":
+                # Restart current track if more than 3 seconds in; otherwise go previous
+                go_prev = True
+                if self._opened_path:
+                    err, pos_str = _mci(f"status {self._ALIAS} position")
+                    if err == 0 and pos_str.strip().isdigit() and int(pos_str.strip()) > 3000:
+                        go_prev = False
+                target = (self._track_idx - 1) if go_prev else self._track_idx
+                self._mci_open_and_play(target)
+            elif cmd == "volume":
+                if self._opened_path:
+                    self._mci_apply_volume()
+                self._notify_music()
 
     def cleanup(self) -> None:
         self.ambient_chimes_on = False
         self.music_on = False
+        self.is_playing = False
+        self.is_paused = False
         self._ambient_stop.set()
-        self._music_stop.set()
+        self._worker_stop.set()
+        self._cmd_q.put(("quit", None))
         try:
             winsound.PlaySound(None, 0)
         except Exception:

@@ -1,7 +1,5 @@
 # src/tray_ui.py
 from ctypes import byref, wintypes
-import os
-import subprocess
 import threading
 import tkinter as tk
 import webbrowser
@@ -9,7 +7,7 @@ import webbrowser
 from pystray import Icon, Menu, MenuItem
 
 from sprites import load_tray_image
-from state import FROST_MODES, SNOW_MODES, SPARKLE_MODES, MUSIC_DIR
+from state import FROST_MODES, SNOW_MODES, SPARKLE_MODES
 from version import __version__, GITHUB_REPO
 from win32 import (
     apply_rounded_corners,
@@ -26,6 +24,7 @@ def _palette(light: bool) -> dict:
             "fg": "#111827",
             "muted": "#6B7280",
             "hover": "#E5E7EB",
+            "pill": "#F3F4F6",
             "accent": "#DC2626",
             "accent_fg": "#FFFFFF",
             "on": "#16A34A",
@@ -39,6 +38,7 @@ def _palette(light: bool) -> dict:
         "fg": "#F4F4F5",
         "muted": "#A1A1AA",
         "hover": "#27272A",
+        "pill": "#202024",
         "accent": "#DC2626",
         "accent_fg": "#FFFFFF",
         "on": "#22C55E",
@@ -49,7 +49,7 @@ def _palette(light: bool) -> dict:
 
 
 class TrayPopup:
-    WIDTH = 284
+    WIDTH = 296
 
     def __init__(self, root: tk.Tk, state, enqueue, actions: dict):
         self.root = root
@@ -139,14 +139,23 @@ class TrayPopup:
         hdr = tk.Frame(outer, bg=p["bg"])
         hdr.pack(fill="x", pady=(0, 8))
         title = tk.Label(
-            hdr, text="Christmas Overlay", bg=p["bg"], fg=p["fg"],
+            hdr,
+            text="Christmas Overlay",
+            bg=p["bg"],
+            fg=p["fg"],
             font=("Segoe UI", 10, "bold"),
         )
         title.pack(side="left")
 
         vis_btn = tk.Label(
-            hdr, text="Show", bg=p["accent"], fg=p["accent_fg"],
-            font=("Segoe UI", 8, "bold"), padx=10, pady=2, cursor="hand2",
+            hdr,
+            text="Show",
+            bg=p["accent"],
+            fg=p["accent_fg"],
+            font=("Segoe UI", 8, "bold"),
+            padx=10,
+            pady=2,
+            cursor="hand2",
         )
         vis_btn.pack(side="right")
         vis_btn.bind("<Button-1>", lambda e: self._fire("toggle_visibility"))
@@ -157,20 +166,24 @@ class TrayPopup:
         self._widgets["vis_btn"] = vis_btn
         self._widgets["rows"] = []
         self._widgets["seps"] = []
+        self._widgets["media_btns"] = []
 
         self._add_sep(outer)
         self._add_toggle_row(outer, "snow", "Snowfall", "toggle_snow")
         self._add_cycle_row(outer, "mode", "Density", "cycle_mode")
         self._add_toggle_row(outer, "lights", "Fairy Lights", "toggle_lights")
         self._add_cycle_row(outer, "frost", "Frost Border", "cycle_frost")
-        self._add_toggle_row(outer, "countdown", "Christmas Countdown", "toggle_countdown", "Shown", "Hidden")
+        self._add_toggle_row(
+            outer, "countdown", "Christmas Countdown", "toggle_countdown", "Shown", "Hidden"
+        )
         self._add_cycle_row(outer, "sparkles", "Click Sparkles", "cycle_sparkles")
         self._add_toggle_row(outer, "advent", "Advent Calendar", "toggle_advent")
 
         self._add_sep(outer)
         self._add_toggle_row(outer, "chime", "Mode Chime", "toggle_chime_audio")
         self._add_toggle_row(outer, "bells", "Ambient Sleigh Bells", "toggle_ambient_bells")
-        self._add_toggle_row(outer, "music", "Local Christmas Music", "toggle_music")
+        self._add_toggle_row(outer, "music", "Windows Music", "toggle_music")
+        self._add_media_controls(outer)
         self._add_action_row(outer, "music_folder", "Open Music Folder", "open_music_folder")
 
         self._add_sep(outer)
@@ -180,19 +193,26 @@ class TrayPopup:
         self._add_toggle_row(outer, "seasonal", "Seasonal Auto-Mode", "toggle_seasonal")
 
         self._add_sep(outer)
-        self._add_action_row(outer, "update", "Check for Updates", "handle_update", close=True)
+        self._add_action_row(outer, "update", "Check for Updates", "handle_update", close=False)
 
-        # footer: version + repo link
+        # Footer: version + repo link
         footer = tk.Frame(outer, bg=p["bg"])
         footer.pack(fill="x", pady=(6, 0))
         version_lbl = tk.Label(
-            footer, text=f"v{__version__}", bg=p["bg"], fg=p["muted"],
+            footer,
+            text=f"v{__version__}",
+            bg=p["bg"],
+            fg=p["muted"],
             font=("Segoe UI", 8),
         )
         version_lbl.pack(side="left")
         repo_lbl = tk.Label(
-            footer, text="GitHub", bg=p["bg"], fg=p["link"],
-            font=("Segoe UI", 8, "underline"), cursor="hand2",
+            footer,
+            text="GitHub",
+            bg=p["bg"],
+            fg=p["link"],
+            font=("Segoe UI", 8, "underline"),
+            cursor="hand2",
         )
         repo_lbl.pack(side="right")
         repo_lbl.bind(
@@ -207,6 +227,72 @@ class TrayPopup:
 
         self.win = win
         self.state.subscribe(self.refresh)
+
+    def _add_media_controls(self, parent) -> None:
+        p = self._pal
+        card = tk.Frame(parent, bg=p["pill"], padx=8, pady=5)
+        card.pack(fill="x", pady=(2, 3))
+
+        track_lbl = tk.Label(
+            card,
+            text="♪ Ready",
+            bg=p["pill"],
+            fg=p["muted"],
+            font=("Segoe UI", 8),
+            anchor="w",
+        )
+        track_lbl.pack(fill="x", pady=(0, 4))
+
+        bar = tk.Frame(card, bg=p["pill"])
+        bar.pack(fill="x")
+
+        def make_btn(text: str, action_key: str, padx: int = 7):
+            btn = tk.Label(
+                bar,
+                text=text,
+                bg=p["bg"],
+                fg=p["fg"],
+                font=("Segoe UI", 8, "bold"),
+                padx=padx,
+                pady=2,
+                cursor="hand2",
+            )
+            btn.bind("<Enter>", lambda _: btn.configure(bg=self._pal["hover"]))
+            btn.bind("<Leave>", lambda _: btn.configure(bg=self._pal["bg"]))
+            btn.bind("<Button-1>", lambda _: self._fire(action_key))
+            self._widgets["media_btns"].append(btn)
+            return btn
+
+        prev_btn = make_btn("⏮", "music_prev", padx=6)
+        prev_btn.pack(side="left", padx=(0, 3))
+
+        play_btn = make_btn("▶", "music_play_pause", padx=8)
+        play_btn.pack(side="left", padx=(0, 3))
+
+        next_btn = make_btn("⏭", "music_next", padx=6)
+        next_btn.pack(side="left")
+
+        vol_up = make_btn("+", "music_vol_up", padx=5)
+        vol_up.pack(side="right")
+
+        vol_lbl = tk.Label(
+            bar,
+            text="75%",
+            bg=p["pill"],
+            fg=p["muted"],
+            font=("Segoe UI", 8),
+            width=4,
+        )
+        vol_lbl.pack(side="right", padx=2)
+
+        vol_down = make_btn("−", "music_vol_down", padx=5)
+        vol_down.pack(side="right")
+
+        self._widgets["media_card"] = card
+        self._widgets["media_bar"] = bar
+        self._widgets["media_track"] = track_lbl
+        self._widgets["media_play_btn"] = play_btn
+        self._widgets["media_vol_lbl"] = vol_lbl
 
     def _add_sep(self, parent) -> None:
         s = tk.Frame(parent, bg=self._pal["sep"], height=1)
@@ -280,6 +366,12 @@ class TrayPopup:
         self._widgets["title"].configure(bg=p["bg"], fg=p["fg"])
         self._widgets["version_lbl"].configure(bg=p["bg"], fg=p["muted"])
         self._widgets["repo_lbl"].configure(bg=p["bg"], fg=p["link"])
+        self._widgets["media_card"].configure(bg=p["pill"])
+        self._widgets["media_bar"].configure(bg=p["pill"])
+        self._widgets["media_track"].configure(bg=p["pill"], fg=p["muted"])
+        self._widgets["media_vol_lbl"].configure(bg=p["pill"], fg=p["muted"])
+        for btn in self._widgets["media_btns"]:
+            btn.configure(bg=p["bg"], fg=p["fg"])
         for s in self._widgets["seps"]:
             s.configure(bg=p["sep"])
         for row, lbl, fg_key in self._widgets["rows"]:
@@ -315,6 +407,20 @@ class TrayPopup:
             _, dot, val, on_txt, off_txt = self._widgets[k]
             dot.configure(fg=p["on"] if on else p["off"])
             val.configure(text=on_txt if on else off_txt)
+
+        # Media player status
+        media_info = self.actions["music_status"]() if "music_status" in self.actions else {}
+        is_playing = bool(media_info.get("playing", False))
+        track = media_info.get("track", "")
+        if len(track) > 34:
+            track = track[:33] + "…"
+        prefix = "♪ " if is_playing else ("❚❚ " if media_info.get("paused") else "♪ ")
+        self._widgets["media_track"].configure(
+            text=f"{prefix}{track}" if track else "♪ Add audio files to Windows Music",
+            fg=p["fg"] if is_playing else p["muted"],
+        )
+        self._widgets["media_play_btn"].configure(text="❚❚" if is_playing else "▶")
+        self._widgets["media_vol_lbl"].configure(text=f"{st.music_volume}%")
 
         frost_txt = FROST_MODES[st.frost_mode_idx]
         if st.frost_mode_idx == 0 and "weather_temp" in self.actions:

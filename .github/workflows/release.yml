@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.0.1)"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -11,16 +17,40 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
-      - run: pip install -r requirements.txt
-      - name: Build exe
-        run: pyinstaller tests/ChristmasOverlay.spec
-      - name: Release
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify syntax
+        run: python -m compileall -q src
+
+      - name: Build Windows executable
+        run: pyinstaller --clean --noconfirm ChristmasOverlay.spec
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/ChristmasOverlay.exe")) {
+            throw "Build failed: dist/ChristmasOverlay.exe was not created."
+          }
+          Get-Item "dist/ChristmasOverlay.exe" | Select-Object Name, Length
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/ChristmasOverlay.exe
+          files: |
+            dist/ChristmasOverlay.exe
+            tests/install.bat
           generate_release_notes: true
