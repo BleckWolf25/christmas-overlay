@@ -66,6 +66,7 @@ from win32 import (
     trim_working_set,
     user32,
 )
+from window_snow import WindowSnowLedges
 from window_tracker import WindowTracker
 
 if is_frozen():
@@ -118,7 +119,7 @@ class ChristmasOverlay:
         self.vx, self.vy, self.vw, self.vh = self._query_virtual_screen()
         self.monitors = get_monitors() or [(0, 0, self.vw, self.vh)]
 
-        # 1. Topmost overlay window (snow, fairy lights, frost, countdown, advent, sparkles, toasts)
+        # 1. Topmost overlay window (snow, window snow caps, fairy lights, frost, countdown, advent, sparkles, toasts)
         self.root = tk.Tk()
         self.root.overrideredirect(True)
         self.root.geometry(f"{self.vw}x{self.vh}+{self.vx}+{self.vy}")
@@ -291,6 +292,8 @@ class ChristmasOverlay:
         self.snow = SnowSystem(self.canvas, self.vw, self.vh)
         self.snow.enabled = self.state.snow_enabled
         self.snow.set_target(SNOW_MODES[self.state.mode_idx][1])
+        self.window_snow = WindowSnowLedges(self.canvas)
+        self.window_snow.enabled = self.state.window_snow_enabled
         self.countdown = CountdownHUD(
             self.canvas, self.vx, self.vy, self.state.countdown_visible, self.state.user_name
         )
@@ -304,18 +307,42 @@ class ChristmasOverlay:
         )
 
     def _apply_initial_system_state(self) -> None:
+        changed = False
         if self.state.wallpaper_enabled:
             ok, _ = self.theme_mgr.apply_wallpaper(self.vw, self.vh)
             if not ok:
                 self.state.wallpaper_enabled = False
-                self.state.save()
+                changed = True
+        if self.state.lockscreen_enabled:
+            ok, _ = self.theme_mgr.apply_lockscreen(self.vw, self.vh)
+            if not ok:
+                self.state.lockscreen_enabled = False
+                changed = True
         if self.state.accent_enabled:
             self.theme_mgr.apply_accent()
+        if self.state.cursors_enabled:
+            ok, _ = self.theme_mgr.apply_cursors()
+            if not ok:
+                self.state.cursors_enabled = False
+                changed = True
+        if self.state.festive_icons_enabled:
+            ok, info = self.theme_mgr.apply_festive_icons()
+            if ok and info:
+                try:
+                    self.root.iconbitmap(info)
+                except Exception:
+                    pass
+            else:
+                self.state.festive_icons_enabled = False
+                changed = True
         if self.state.music_enabled:
             if not self.audio.set_music_enabled(True):
                 self.state.music_enabled = False
+                changed = True
         if self.state.ambient_bells_enabled:
             self.audio.set_ambient_chimes(True)
+        if changed:
+            self.state.save()
 
     def _toggle_attr(self, attr: str, side_effect=None) -> None:
         val = not getattr(self.state, attr)
@@ -341,6 +368,9 @@ class ChristmasOverlay:
                 "visible", lambda _: self._sync_window_visibility()
             ),
             "toggle_snow": lambda: self._toggle_attr("snow_enabled", self.snow.set_enabled),
+            "toggle_window_snow": lambda: self._toggle_attr(
+                "window_snow_enabled", self.window_snow.set_enabled
+            ),
             "cycle_mode": self.cycle_mode,
             "toggle_lights": lambda: self._toggle_attr("lights_visible", self.lights.toggle),
             "cycle_frost": self.cycle_frost,
@@ -367,7 +397,10 @@ class ChristmasOverlay:
             },
             "open_music_folder": self.open_music_folder,
             "toggle_wallpaper": self.toggle_wallpaper,
+            "toggle_lockscreen": self.toggle_lockscreen,
             "toggle_accent": self.toggle_accent,
+            "toggle_cursors": self.toggle_cursors,
+            "toggle_festive_icons": self.toggle_festive_icons,
             "toggle_autostart": self.toggle_autostart,
             "toggle_seasonal": self.toggle_seasonal,
             "update_label": self._update_button_label,
@@ -490,6 +523,17 @@ class ChristmasOverlay:
             self.state.wallpaper_enabled = False
         self.state.notify()
 
+    def toggle_lockscreen(self) -> None:
+        if not self.state.lockscreen_enabled:
+            ok, err = self.theme_mgr.apply_lockscreen(self.vw, self.vh)
+            self.state.lockscreen_enabled = ok
+            if not ok and err:
+                self.show_toast(err)
+        else:
+            self.theme_mgr.restore_lockscreen()
+            self.state.lockscreen_enabled = False
+        self.state.notify()
+
     def toggle_accent(self) -> None:
         if not self.state.accent_enabled:
             self.theme_mgr.apply_accent()
@@ -497,6 +541,42 @@ class ChristmasOverlay:
         else:
             self.theme_mgr.restore_accent()
             self.state.accent_enabled = False
+        self.state.notify()
+
+    def toggle_cursors(self) -> None:
+        if not self.state.cursors_enabled:
+            ok, err = self.theme_mgr.apply_cursors()
+            self.state.cursors_enabled = ok
+            if not ok and err:
+                self.show_toast(err)
+        else:
+            self.theme_mgr.restore_cursors()
+            self.state.cursors_enabled = False
+        self.state.notify()
+
+    def toggle_festive_icons(self) -> None:
+        if not self.state.festive_icons_enabled:
+            ok, info = self.theme_mgr.apply_festive_icons()
+            self.state.festive_icons_enabled = ok
+            if ok:
+                self.tray.set_festive_icon(True)
+                if info:
+                    try:
+                        self.root.iconbitmap(info)
+                    except Exception:
+                        pass
+            elif info:
+                self.show_toast(info)
+        else:
+            self.theme_mgr.restore_festive_icons()
+            self.tray.set_festive_icon(False)
+            try:
+                ico = resource_path("icon.ico")
+                if os.path.exists(ico):
+                    self.root.iconbitmap(ico)
+            except Exception:
+                pass
+            self.state.festive_icons_enabled = False
         self.state.notify()
 
     def _apply_win32_styles(self) -> None:
@@ -664,8 +744,30 @@ class ChristmasOverlay:
                     self._auto_hidden = fs
                     self._sync_window_visibility()
 
+        if self._locked or self.tick % self.FULLSCREEN_INTERVAL == 0:
+            was_locked = self._locked
+            self._locked = is_workstation_locked()
+            self._idle_sec = get_idle_seconds()
+
+            if was_locked and not self._locked:
+                self.mouse_down = False
+                self.rbutton_down = False
+                self._auto_hidden = False
+                self._sync_window_visibility()
+                self.tracker.update_rects()
+                self._assert_topmost()
+                place_window_on_desktop(self.desktop_hwnd)
+                self.root.after(1, self._loop)
+                return
+
+            if not self._locked:
+                fs = self.tracker.is_fullscreen_app()
+                if fs != self._auto_hidden:
+                    self._auto_hidden = fs
+                    self._sync_window_visibility()
+
         if self._locked or self._auto_hidden or not self.state.visible:
-            self.root.after(300, self._loop)
+            self.root.after(120 if self._locked else 300, self._loop)
             return
 
         if self.env_counter % self.ENV_INTERVAL == 0:
@@ -724,6 +826,7 @@ class ChristmasOverlay:
         env = self.tracker.get_env_rects()
         self.border.update(self.state.frost_mode_idx, self._idle_sec, self.weather.is_cold)
         self.snow.update(self.tick, cx, cy, env)
+        self.window_snow.update(self.tick, env, snow_active=self.state.snow_enabled)
         self.sparkles.update(env)
         if self.state.advent_enabled:
             self.advent.update(self.tick, cx, cy)
@@ -734,6 +837,8 @@ class ChristmasOverlay:
 
     def run(self) -> None:
         self.tray.start()
+        if self.state.festive_icons_enabled:
+            self.tray.set_festive_icon(True)
         self.weather.start()
         self._sync_window_visibility()
         self.root.after(0, self._loop)

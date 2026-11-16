@@ -30,6 +30,7 @@ SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
 SWP_NOACTIVATE = 0x0010
 
+SM_CXCURSOR = 13
 SM_XVIRTUALSCREEN = 76
 SM_YVIRTUALSCREEN = 77
 SM_CXVIRTUALSCREEN = 78
@@ -46,9 +47,26 @@ VK_X = 0x58
 SPI_GETDESKWALLPAPER = 0x0073
 SPI_SETDESKWALLPAPER = 0x0014
 SPI_GETWORKAREA = 0x0030
+SPI_SETCURSORS = 0x0057
 SPI_GETCLIENTAREAANIMATION = 0x1042
 SPIF_UPDATEINIFILE = 0x01
 SPIF_SENDCHANGE = 0x02
+
+IMAGE_CURSOR = 2
+LR_LOADFROMFILE = 0x00000010
+
+OCR_NORMAL = 32512
+OCR_IBEAM = 32513
+OCR_WAIT = 32514
+OCR_NO = 32648
+OCR_HAND = 32649
+OCR_APPSTARTING = 32650
+
+SHCNE_ASSOCCHANGED = 0x08000000
+SHCNE_UPDATEITEM = 0x00002000
+SHCNF_IDLIST = 0x0000
+SHCNF_PATHW = 0x0005
+SHCNF_FLUSH = 0x1000
 
 HWND_BROADCAST = 0xFFFF
 WM_SETTINGCHANGE = 0x001A
@@ -135,7 +153,6 @@ def get_windows_music_dir() -> str:
         pass
     return os.path.join(os.path.expanduser("~"), "Music")
 
-
 def place_window_on_desktop(hwnd: int) -> None:
     """Keeps a window at the bottom of normal Z-order (above desktop, below all apps)."""
     try:
@@ -151,6 +168,74 @@ def place_window_on_desktop(hwnd: int) -> None:
     except Exception:
         pass
 
+def get_preferred_cursor_size() -> int:
+    """Returns a DPI-appropriate cursor size (24..96 px)."""
+    try:
+        sz = int(user32.GetSystemMetrics(SM_CXCURSOR))
+        if 24 <= sz <= 96:
+            return sz
+    except Exception:
+        pass
+    return 36
+
+
+def apply_system_cursors(cursor_map: dict[int, str]) -> bool:
+    """Loads .cur files and assigns them to system OCR_* cursor slots."""
+    user32.LoadImageW.argtypes = [
+        wintypes.HINSTANCE,
+        wintypes.LPCWSTR,
+        wintypes.UINT,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.UINT,
+    ]
+    user32.LoadImageW.restype = wintypes.HANDLE
+    user32.SetSystemCursor.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    user32.SetSystemCursor.restype = wintypes.BOOL
+
+    applied = 0
+    for ocr_id, cur_path in cursor_map.items():
+        if not os.path.exists(cur_path):
+            continue
+        hcur = user32.LoadImageW(None, cur_path, IMAGE_CURSOR, 0, 0, LR_LOADFROMFILE)
+        if hcur:
+            # SetSystemCursor takes ownership and destroys hcur automatically
+            if user32.SetSystemCursor(hcur, ocr_id):
+                applied += 1
+    return applied > 0
+
+
+def restore_system_cursors() -> None:
+    """Reloads the user's saved Windows cursor scheme from the registry."""
+    try:
+        user32.SystemParametersInfoW(SPI_SETCURSORS, 0, None, 0)
+    except Exception:
+        pass
+
+
+def notify_shell_icons_changed() -> None:
+    """Forces Windows Explorer to refresh desktop & Recycle Bin icons immediately."""
+    try:
+        shell32.SHChangeNotify.argtypes = [
+            wintypes.LONG,
+            wintypes.UINT,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        shell32.SHChangeNotify(
+            SHCNE_UPDATEITEM,
+            SHCNF_PATHW | SHCNF_FLUSH,
+            ctypes.c_wchar_p("::{645FF040-5081-101B-9F08-00AA002F954E}"),
+            None,
+        )
+        shell32.SHChangeNotify(
+            SHCNE_ASSOCCHANGED,
+            SHCNF_IDLIST | SHCNF_FLUSH,
+            None,
+            None,
+        )
+    except Exception:
+        pass
 
 def enable_per_monitor_dpi() -> None:
     try:

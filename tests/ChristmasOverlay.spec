@@ -1,39 +1,64 @@
-# ChristmasOverlay.spec
 # -*- mode: python ; coding: utf-8 -*-
 import os
+from PyInstaller.utils.hooks import collect_submodules
 
-ROOT = os.path.abspath(os.path.join(SPECPATH, "..")) if os.path.basename(SPECPATH).lower() == "tests" else os.path.abspath(SPECPATH)
-SRC_DIR = os.path.join(ROOT, "src")
-ASSETS_DIR = os.path.join(ROOT, "assets")
+block_cipher = None
+
+# Bundle icon.ico and any assets/sprites directories if present
+datas = []
+for candidate in ("icon.ico", os.path.join("src", "icon.ico"), os.path.join("assets", "icon.ico")):
+    if os.path.exists(candidate):
+        datas.append((candidate, "."))
+        break
+
+for folder in ("assets", "sprites", os.path.join("src", "assets")):
+    if os.path.isdir(folder):
+        datas.append((folder, os.path.basename(folder)))
+
+hiddenimports = [
+    "pystray._win32",
+    "PIL._tkinter_finder",
+    "PIL.Image",
+    "PIL.ImageDraw",
+    "PIL.ImageFilter",
+    "PIL.ImageTk",
+] + collect_submodules("pystray")
+
+icon_file = next(
+    (p for p in ("icon.ico", os.path.join("src", "icon.ico"), os.path.join("assets", "icon.ico")) if os.path.exists(p)),
+    None,
+)
 
 a = Analysis(
-    [os.path.join(SRC_DIR, "main.pyw")],
-    pathex=[SRC_DIR],
+    [os.path.join("src", "main.pyw")],
+    pathex=["src"],
     binaries=[],
-    datas=[
-        (os.path.join(ASSETS_DIR, "icon.png"), "."),
-        (os.path.join(ASSETS_DIR, "icon.ico"), "."),
-    ],
-    hiddenimports=["PIL._tkinter_finder", "pystray._win32"],
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
     noarchive=False,
 )
-pyz = PYZ(a.pure)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
     pyz,
     a.scripts,
     a.binaries,
+    a.zipfiles,
     a.datas,
     [],
     name="ChristmasOverlay",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
@@ -42,5 +67,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=os.path.join(ASSETS_DIR, "icon.ico"),
+    icon=icon_file,
 )

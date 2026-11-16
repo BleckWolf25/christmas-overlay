@@ -6,6 +6,7 @@ import webbrowser
 
 from pystray import Icon, Menu, MenuItem
 
+from festive_assets import render_festive_app_icon
 from sprites import load_tray_image
 from state import FROST_MODES, SNOW_MODES, SPARKLE_MODES
 from version import __version__, GITHUB_REPO
@@ -49,7 +50,7 @@ def _palette(light: bool) -> dict:
 
 
 class TrayPopup:
-    WIDTH = 296
+    WIDTH = 304
 
     def __init__(self, root: tk.Tk, state, enqueue, actions: dict):
         self.root = root
@@ -170,6 +171,7 @@ class TrayPopup:
 
         self._add_sep(outer)
         self._add_toggle_row(outer, "snow", "Snowfall", "toggle_snow")
+        self._add_toggle_row(outer, "window_snow", "Window Snow Caps", "toggle_window_snow")
         self._add_cycle_row(outer, "mode", "Density", "cycle_mode")
         self._add_toggle_row(outer, "lights", "Fairy Lights", "toggle_lights")
         self._add_cycle_row(outer, "frost", "Frost Border", "cycle_frost")
@@ -188,7 +190,10 @@ class TrayPopup:
 
         self._add_sep(outer)
         self._add_toggle_row(outer, "wallpaper", "Festive Wallpaper", "toggle_wallpaper")
+        self._add_toggle_row(outer, "lockscreen", "Festive Lock Screen", "toggle_lockscreen")
         self._add_toggle_row(outer, "accent", "Festive Accent Color", "toggle_accent")
+        self._add_toggle_row(outer, "cursors", "Festive Mouse Cursors", "toggle_cursors")
+        self._add_toggle_row(outer, "icons", "Festive App & Bin Icons", "toggle_festive_icons")
         self._add_toggle_row(outer, "autostart", "Start with Windows", "toggle_autostart")
         self._add_toggle_row(outer, "seasonal", "Seasonal Auto-Mode", "toggle_seasonal")
 
@@ -392,13 +397,17 @@ class TrayPopup:
         )
         toggles = {
             "snow": st.snow_enabled,
+            "window_snow": st.window_snow_enabled,
             "lights": st.lights_visible,
             "countdown": st.countdown_visible,
             "chime": st.audio_enabled,
             "bells": st.ambient_bells_enabled,
             "music": st.music_enabled,
             "wallpaper": st.wallpaper_enabled,
+            "lockscreen": st.lockscreen_enabled,
             "accent": st.accent_enabled,
+            "cursors": st.cursors_enabled,
+            "icons": st.festive_icons_enabled,
             "advent": st.advent_enabled,
             "autostart": st.start_with_windows,
             "seasonal": st.auto_seasonal,
@@ -459,6 +468,17 @@ class TrayController:
         )
         self.icon = Icon("ChristmasOverlay", load_tray_image(), "Christmas Overlay", menu)
         threading.Thread(target=self.icon.run, daemon=True).start()
+
+    def set_festive_icon(self, festive: bool) -> None:
+        if not self.icon:
+            return
+        try:
+            if festive:
+                self.icon.icon = render_festive_app_icon().resize((64, 64))
+            else:
+                self.icon.icon = load_tray_image()
+        except Exception:
+            pass
 
     def notify(self, msg: str, title: str = "Christmas Overlay") -> None:
         if self.icon:
