@@ -18,6 +18,8 @@ _OWN_PID = os.getpid()
 _IGNORED_CLASSES = {
     "Progman",
     "WorkerW",
+    "SHELLDLL_DefView",
+    "SysListView32",
     "Shell_TrayWnd",
     "Shell_SecondaryTrayWnd",
     "Windows.UI.Core.CoreWindow",
@@ -88,30 +90,38 @@ class WindowTracker:
         self.cached_windows.clear()
         self.cached_window_entries.clear()
 
+    def _is_trackable_window(self, hwnd: int, cls_buf=None) -> bool:
+        if not hwnd or hwnd == self.overlay_hwnd:
+            return False
+        if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+            return False
+
+        pid = wintypes.DWORD(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == _OWN_PID:
+            return False
+
+        ex_style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        if (ex_style & WS_EX_TOOLWINDOW) and not (ex_style & WS_EX_APPWINDOW):
+            return False
+
+        if cls_buf is None:
+            cls_buf = ctypes.create_unicode_buffer(256)
+        user32.GetClassNameW(hwnd, cls_buf, 256)
+        if cls_buf.value in _IGNORED_CLASSES:
+            return False
+
+        if _is_window_cloaked(hwnd):
+            return False
+
+        return True
+
     def _enumerate_windows(self) -> list[tuple[int, tuple[int, int, int, int]]]:
         entries: list[tuple[int, tuple[int, int, int, int]]] = []
         cls_buf = ctypes.create_unicode_buffer(256)
 
         def cb(hwnd, _lparam):
-            if not hwnd or hwnd == self.overlay_hwnd:
-                return True
-            if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
-                return True
-
-            pid = wintypes.DWORD(0)
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if pid.value == _OWN_PID:
-                return True
-
-            ex_style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            if (ex_style & WS_EX_TOOLWINDOW) and not (ex_style & WS_EX_APPWINDOW):
-                return True
-
-            user32.GetClassNameW(hwnd, cls_buf, 256)
-            if cls_buf.value in _IGNORED_CLASSES:
-                return True
-
-            if _is_window_cloaked(hwnd):
+            if not self._is_trackable_window(hwnd, cls_buf):
                 return True
 
             raw = _get_visual_rect(hwnd)
@@ -138,27 +148,22 @@ class WindowTracker:
         self.cached_windows = [r for _, r in entries]
 
         fg = user32.GetForegroundWindow()
-        if not fg or fg == self.overlay_hwnd:
+        if not self._is_trackable_window(fg):
             self.cached_foreground = None
             self.cached_foreground_rect = None
         else:
-            pid = wintypes.DWORD(0)
-            user32.GetWindowThreadProcessId(fg, ctypes.byref(pid))
-            if pid.value == _OWN_PID:
+            raw = _get_visual_rect(fg)
+            if raw and (raw[2] - raw[0]) >= 160 and (raw[3] - raw[1]) >= 80:
+                self.cached_foreground = int(fg)
+                self.cached_foreground_rect = (
+                    raw[0] - self.vx,
+                    raw[1] - self.vy,
+                    raw[2] - self.vx,
+                    raw[3] - self.vy,
+                )
+            else:
                 self.cached_foreground = None
                 self.cached_foreground_rect = None
-            else:
-                self.cached_foreground = fg
-                raw = _get_visual_rect(fg)
-                if raw and (raw[2] - raw[0]) > 200 and (raw[3] - raw[1]) > 80:
-                    self.cached_foreground_rect = (
-                        raw[0] - self.vx,
-                        raw[1] - self.vy,
-                        raw[2] - self.vx,
-                        raw[3] - self.vy,
-                    )
-                else:
-                    self.cached_foreground_rect = None
 
         tb = user32.FindWindowW("Shell_TrayWnd", None)
         if tb:
