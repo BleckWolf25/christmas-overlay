@@ -25,14 +25,14 @@ def _subtract_intervals(
 
 
 class WindowSnowLedges:
-    """Renders sculpted snow drifts & icicles perched on visible top edges of open windows."""
+    """Renders sculpted snow drifts & icicles perched on the top edge of the active window."""
 
     def __init__(self, canvas):
         self.canvas = canvas
         self.enabled = True
         # hwnd_key -> {"rect": (x1, y1, x2, y2), "depth": float, "seed": int, "items": list[int]}
         self._drifts: dict[int, dict] = {}
-        # Falling snow clumps when a snow-capped window moves or closes
+        # Falling snow clumps when a snow-capped window moves, deactivates, or closes
         self._clumps: list[list] = []
 
     def clear(self) -> None:
@@ -53,44 +53,19 @@ class WindowSnowLedges:
     def _extract_entries(
         env_rects,
     ) -> list[tuple[int, tuple[float, float, float, float]]]:
-        """Normalizes (hwnd, (x1, y1, x2, y2)) entries from WindowTracker.get_env_rects()."""
-        entries: list[tuple[int, tuple[float, float, float, float]]] = []
-        if isinstance(env_rects, dict):
-            raw_entries = env_rects.get("window_entries")
-            if raw_entries:
-                for hwnd, r in raw_entries:
-                    x1, y1, x2, y2 = float(r[0]), float(r[1]), float(r[2]), float(r[3])
-                    if (x2 - x1) >= 160.0 and (y2 - y1) >= 80.0 and y1 >= 4.0:
-                        entries.append((int(hwnd), (x1, y1, x2, y2)))
-                return entries
-
-            raw = None
-            for key in ("windows", "rects", "window_rects", "ledges"):
-                if env_rects.get(key):
-                    raw = env_rects[key]
-                    break
-            if raw is None and env_rects.get("fg"):
-                fg = env_rects["fg"]
-                fg_id = int(env_rects.get("fg_hwnd") or 1)
-                x1, y1, x2, y2 = float(fg[0]), float(fg[1]), float(fg[2]), float(fg[3])
-                if (x2 - x1) >= 160.0 and (y2 - y1) >= 80.0 and y1 >= 4.0:
-                    return [(fg_id, (x1, y1, x2, y2))]
-                return []
-        elif isinstance(env_rects, (list, tuple)):
-            raw = env_rects
-        else:
+        """Returns the active foreground window (hwnd, (x1, y1, x2, y2)) if eligible."""
+        if not isinstance(env_rects, dict):
             return []
 
-        for idx, r in enumerate(raw or []):
-            if isinstance(r, (list, tuple)) and len(r) >= 4:
-                x1, y1, x2, y2 = float(r[0]), float(r[1]), float(r[2]), float(r[3])
-            elif hasattr(r, "left") and hasattr(r, "top"):
-                x1, y1, x2, y2 = float(r.left), float(r.top), float(r.right), float(r.bottom)
-            else:
-                continue
-            if (x2 - x1) >= 160.0 and (y2 - y1) >= 80.0 and y1 >= 4.0:
-                entries.append((idx + 1, (x1, y1, x2, y2)))
-        return entries
+        fg = env_rects.get("fg")
+        fg_hwnd = env_rects.get("fg_hwnd")
+        if not fg or not fg_hwnd:
+            return []
+
+        x1, y1, x2, y2 = float(fg[0]), float(fg[1]), float(fg[2]), float(fg[3])
+        if (x2 - x1) >= 160.0 and (y2 - y1) >= 80.0 and y1 >= 4.0:
+            return [(int(fg_hwnd), (x1, y1, x2, y2))]
+        return []
 
     def _shatter_drift(
         self, rect: tuple[float, float, float, float], depth: float
@@ -201,7 +176,7 @@ class WindowSnowLedges:
         if tick % 3 != 0:
             return
 
-        entries = self._extract_entries(env_rects)[:8]
+        entries = self._extract_entries(env_rects)
         new_drifts: dict[int, dict] = {}
         matched_keys: set[int] = set()
 
